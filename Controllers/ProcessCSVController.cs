@@ -35,150 +35,283 @@ namespace SignalTracker.Controllers
     public class ProcessCSVController : Controller
     {
         private static TimeZoneInfo INDIAN_ZONE = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
-        ApplicationDbContext db = null;
-        CommonFunction cf = null;
+        // ApplicationDbContext db = null;
+        // CommonFunction cf = null;
+
+        private readonly ApplicationDbContext db;
+    private readonly CommonFunction cf;
         public ProcessCSVController(ApplicationDbContext context, CommonFunction _cf)
         {
-            db = context;
-            cf = _cf;
+            this.db = context;
+            this.cf = _cf;
         }
-        public bool Process(int ExcelId, string directoryPath, string originalFileName, string polygonFilePath, int fileType, int projectId, string Remarks, out string errorMsag)
-        {
-            bool ret = ProcessFile(fileType, ExcelId, directoryPath, originalFileName, polygonFilePath, projectId, Remarks, out errorMsag);
-            return ret;
+        // public bool Process(int ExcelId, string directoryPath, string originalFileName, string polygonFilePath, int fileType, int projectId, string Remarks, out string errorMsag)
+        // {
+        //     bool ret = ProcessFile(fileType, ExcelId, directoryPath, originalFileName, polygonFilePath, projectId, Remarks, out errorMsag);
+        //     return ret;
 
-        }
-        public bool ProcessFile(int fileType, int excelID, string directorypath, string originalFileName, string polygonFilePath, int projectId, string Remarks, out string errorMsag)
+        // }
+
+      // In SignalTracker/Controllers/ProcessCSVController.cs
+
+public bool Process(int ExcelId, string directoryPath, string originalFileName, string polygonFilePath, int fileType, int projectId, string Remarks, out string errorMsg)
+{
+    // This method now simply passes the data along. 
+    // The real logic is in ProcessFile.
+    return ProcessFile(fileType, ExcelId, directoryPath, originalFileName, polygonFilePath, projectId, Remarks, out errorMsg);
+}
+
+public bool ProcessFile(int fileType, int excelID, string directorypath, string originalFileName, string polygonFilePath, int projectId, string Remarks, out string errorMsg)
+{
+    bool isSuccess = true;
+    List<string> allErrorList = new List<string>();
+    errorMsg = "";
+
+    try
+    {
+        var extractpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Extract" + DateTime.Now.ToString("MMddyyyyHmmss"));
+        List<string> files = new List<string>();
+        List<string> imageList = new List<string>();
+
+        // Process main file (Zip or CSV)
+        if (IsValidZip(directorypath))
         {
-            bool IsValidSheet = true;
+            (files, imageList) = ExtractZipAndSeparateFiles(directorypath, extractpath);
+        }
+        else
+        {
+            files.Add(directorypath);
+        }
+
+        int sessionId = 0; // Initialize session ID
+
+        // --- ✨ KEY FIX: Safely process the optional polygon file ---
+        if (fileType == 2)
+        {
+            // Only attempt to process polygon files if a path was actually provided.
+            if (!string.IsNullOrEmpty(polygonFilePath))
+            {
+                List<string> polygonFiles = new List<string>();
+                if (IsValidZip(polygonFilePath))
+                {
+                    polygonFiles = ExtractJsonFiles(polygonFilePath, extractpath);
+                }
+                else
+                {
+                    polygonFiles.Add(polygonFilePath);
+                }
+
+                foreach (string file in polygonFiles)
+                {
+                    List<string> errorList;
+                            ProcessPredictionPloygonJson(file, excelID, projectId, out errorList);
+                    if (errorList.Count > 0)
+                    {
+                        allErrorList.AddRange(errorList);
+                        isSuccess = false; // Mark as failed if any polygon processing fails
+                    }
+                }
+            }
+        }
+        
+        // Create session if needed (assuming fileType 1 is network log)
+        if (fileType == 1)
+        {
+             var session = new tbl_session {
+                user_id = cf?.UserId ?? 1,
+                type = "network",
+                notes = string.IsNullOrEmpty(Remarks) ? "file upload" : Remarks,
+                uploaded_on = DateTime.Now,
+                tbl_upload_id = excelID
+            };
+            db.tbl_session.Add(session);
+            db.SaveChanges();
+            sessionId = session.id;
+        }
+
+        // Process main file(s)
+        foreach (string file in files)
+        {
             List<string> errorList = new List<string>();
-            List<string> allErrorList = new List<string>();
-            List<string> uploadedSuccessSheetList = new List<string>();
-            int rowInserted = 0;
-            int rowUpdated = 0;
-            errorMsag = "";
-            try
+            bool sheetIsValid = true;
+
+            if (fileType == 1)
             {
-                if (System.IO.File.Exists(directorypath))
-                {
-                    var extractpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Extract" + DateTime.Now.ToString("MMddyyyyHmmss"));
-
-                    List<string> files = new List<string>();
-                    List<string> polygonFiles = new List<string>();
-                    List<string> imageList = new List<string>();
-
-                    bool isZipFile = IsValidZip(directorypath);
-
-                    if (isZipFile)
-                    {
-                        (files, imageList) = ExtractZipAndSeparateFiles(directorypath, extractpath);
-                    }
-                    else
-                        files.Add(directorypath);
-
-
-                    int sessionId = 0;
-                    if (fileType == 1)
-                    {
-                        var session = new tbl_session();
-                        session.user_id = 1; //user who is uploading
-                        session.type = "network";
-                        session.notes = string.IsNullOrEmpty(Remarks) ? "file upload" : Remarks;
-                        session.uploaded_on = DateTime.Now;
-                        session.tbl_upload_id = 1;
-
-                        db.tbl_session.Add(session);
-                        db.SaveChanges();
-                        sessionId = session.id; //skg
-                    }
-                    else if (fileType == 2)
-                    {
-                        bool isPolygonZipFile = IsValidZip(polygonFilePath);
-                        if (isPolygonZipFile)
-                        {
-                            polygonFiles = ExtractJsonFiles(polygonFilePath, extractpath);
-                        }
-                        else
-                            polygonFiles.Add(polygonFilePath);
-
-                        foreach (string file in polygonFiles)
-                        {
-                            if (!string.IsNullOrEmpty(file))
-                            {
-                                ProcessPredictionPloygonJson(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
-                                if (errorList.Count > 0)
-                                    allErrorList.AddRange(errorList);
-                            }
-                        }
-                    }
-
-
-
-                    foreach (string file in files)
-                    {
-
-                        if (fileType == 1)
-                            IsValidSheet = ProcessNetLogWorkSheet(sessionId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList);
-                        else if (fileType == 2)
-                            IsValidSheet = ProcessCtrPredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
-
-                        if (errorList.Count > 0)
-                            allErrorList.AddRange(errorList);
-                    }
-                    //Move images in another folder
-                    if (IsValidSheet && imageList.Count > 0)
-                    {
-                        var imgpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Images_" + sessionId);
-                        if (!Directory.Exists(imgpath))
-                            Directory.CreateDirectory(imgpath);
-                        foreach (var imagePath in imageList)
-                        {
-                            string fileName = Path.GetFileName(imagePath);
-                            string destPath = Path.Combine(imgpath, fileName);
-
-                            if (System.IO.File.Exists(destPath))
-                                System.IO.File.Delete(destPath);
-
-                            System.IO.File.Move(imagePath, destPath);
-                        }
-                    }
-                    try
-                    {
-                        Directory.Delete(extractpath, recursive: true);
-                    }
-                    catch { }
-                }
+                int inserted = 0, updated = 0; // Dummy variables if not used elsewhere
+                sheetIsValid = ProcessNetLogWorkSheet(sessionId, file, imageList, excelID, ref inserted, ref updated, out errorList);
             }
-            catch (Exception ex)
+            else if (fileType == 2)
             {
-                IsValidSheet = false;
-                errorMsag = "Exception " + ex.Message;
-            }
-            //if (errorList.Count > 0)
-            //{
-            //    errorMsag += string.Join(Environment.NewLine, errorList);
-            //}
-            if (allErrorList.Count > 0)
-            {
-                errorMsag = "Errorneous Sheets:" + Environment.NewLine;
-                errorMsag += string.Join(Environment.NewLine, allErrorList);
-
-                if (uploadedSuccessSheetList.Count > 0)
-                {
-                    errorMsag += Environment.NewLine;
-                    errorMsag += "Uploaded Sheets: " + Environment.NewLine;
-                    errorMsag += string.Join(Environment.NewLine, uploadedSuccessSheetList);
-                }
-            }
-            else if (fileType == 15 && uploadedSuccessSheetList.Count > 0)
-            {
-                errorMsag += Environment.NewLine;
-                errorMsag += "Uploaded Sheets: " + Environment.NewLine;
-                errorMsag += string.Join(Environment.NewLine, uploadedSuccessSheetList);
+                int inserted = 0, updated = 0; // Dummy variables
+                sheetIsValid = ProcessCtrPredictionSheet(file, excelID, projectId, ref inserted, ref updated, out errorList);
             }
 
-            return IsValidSheet;
+            if (!sheetIsValid)
+            {
+                isSuccess = false;
+            }
+            if (errorList.Count > 0)
+            {
+                allErrorList.AddRange(errorList);
+            }
         }
+
+        // Cleanup
+        if (Directory.Exists(extractpath))
+        {
+            try { Directory.Delete(extractpath, true); } catch { }
+        }
+    }
+    catch (Exception ex)
+    {
+        isSuccess = false;
+        allErrorList.Add("A critical error occurred during processing: " + ex.Message);
+    }
+
+    if (allErrorList.Count > 0)
+    {
+        errorMsg = string.Join(Environment.NewLine, allErrorList);
+    }
+
+    return isSuccess;
+}
+
+        private void ProcessPredictionPloygonJson(string file, int excelID, int projectId, out List<string> errorList)
+        {
+            throw new NotImplementedException();
+        }
+
+        // public bool ProcessFile(int fileType, int excelID, string directorypath, string originalFileName, string polygonFilePath, int projectId, string Remarks, out string errorMsag)
+        // {
+        //     bool IsValidSheet = true;
+        //     List<string> errorList = new List<string>();
+        //     List<string> allErrorList = new List<string>();
+        //     List<string> uploadedSuccessSheetList = new List<string>();
+        //     int rowInserted = 0;
+        //     int rowUpdated = 0;
+        //     errorMsag = "";
+        //     try
+        //     {
+        //         if (System.IO.File.Exists(directorypath))
+        //         {
+        //             var extractpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Extract" + DateTime.Now.ToString("MMddyyyyHmmss"));
+
+        //             List<string> files = new List<string>();
+        //             List<string> polygonFiles = new List<string>();
+        //             List<string> imageList = new List<string>();
+
+        //             bool isZipFile = IsValidZip(directorypath);
+
+        //             if (isZipFile)
+        //             {
+        //                 (files, imageList) = ExtractZipAndSeparateFiles(directorypath, extractpath);
+        //             }
+        //             else
+        //                 files.Add(directorypath);
+
+
+        //             int sessionId = 0;
+        //             if (fileType == 1)
+        //             {
+        //                 var session = new tbl_session();
+        //                 session.user_id = 1; //user who is uploading
+        //                 session.type = "network";
+        //                 session.notes = string.IsNullOrEmpty(Remarks) ? "file upload" : Remarks;
+        //                 session.uploaded_on = DateTime.Now;
+        //                 session.tbl_upload_id = 1;
+
+        //                 db.tbl_session.Add(session);
+        //                 db.SaveChanges();
+        //                 sessionId = session.id; //skg
+        //             }
+        //             else if (fileType == 2)
+        //             {
+        //                 bool isPolygonZipFile = IsValidZip(polygonFilePath);
+        //                 if (isPolygonZipFile)
+        //                 {
+        //                     polygonFiles = ExtractJsonFiles(polygonFilePath, extractpath);
+        //                 }
+        //                 else
+        //                     polygonFiles.Add(polygonFilePath);
+
+        //                 foreach (string file in polygonFiles)
+        //                 {
+        //                     if (!string.IsNullOrEmpty(file))
+        //                     {
+        //                         ProcessPredictionPloygonJson(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
+        //                         if (errorList.Count > 0)
+        //                             allErrorList.AddRange(errorList);
+        //                     }
+        //                 }
+        //             }
+
+
+
+        //             foreach (string file in files)
+        //             {
+
+        //                 if (fileType == 1)
+        //                     IsValidSheet = ProcessNetLogWorkSheet(sessionId, file, imageList, excelID, ref rowInserted, ref rowUpdated, out errorList);
+        //                 else if (fileType == 2)
+        //                     IsValidSheet = ProcessCtrPredictionSheet(file, excelID, projectId, ref rowInserted, ref rowUpdated, out errorList);
+
+        //                 if (errorList.Count > 0)
+        //                     allErrorList.AddRange(errorList);
+        //             }
+        //             //Move images in another folder
+        //             if (IsValidSheet && imageList.Count > 0)
+        //             {
+        //                 var imgpath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", "Images_" + sessionId);
+        //                 if (!Directory.Exists(imgpath))
+        //                     Directory.CreateDirectory(imgpath);
+        //                 foreach (var imagePath in imageList)
+        //                 {
+        //                     string fileName = Path.GetFileName(imagePath);
+        //                     string destPath = Path.Combine(imgpath, fileName);
+
+        //                     if (System.IO.File.Exists(destPath))
+        //                         System.IO.File.Delete(destPath);
+
+        //                     System.IO.File.Move(imagePath, destPath);
+        //                 }
+        //             }
+        //             try
+        //             {
+        //                 Directory.Delete(extractpath, recursive: true);
+        //             }
+        //             catch { }
+        //         }
+        //     }
+        //     catch (Exception ex)
+        //     {
+        //         IsValidSheet = false;
+        //         errorMsag = "Exception " + ex.Message;
+        //     }
+        //     //if (errorList.Count > 0)
+        //     //{
+        //     //    errorMsag += string.Join(Environment.NewLine, errorList);
+        //     //}
+        //     if (allErrorList.Count > 0)
+        //     {
+        //         errorMsag = "Errorneous Sheets:" + Environment.NewLine;
+        //         errorMsag += string.Join(Environment.NewLine, allErrorList);
+
+        //         if (uploadedSuccessSheetList.Count > 0)
+        //         {
+        //             errorMsag += Environment.NewLine;
+        //             errorMsag += "Uploaded Sheets: " + Environment.NewLine;
+        //             errorMsag += string.Join(Environment.NewLine, uploadedSuccessSheetList);
+        //         }
+        //     }
+        //     else if (fileType == 15 && uploadedSuccessSheetList.Count > 0)
+        //     {
+        //         errorMsag += Environment.NewLine;
+        //         errorMsag += "Uploaded Sheets: " + Environment.NewLine;
+        //         errorMsag += string.Join(Environment.NewLine, uploadedSuccessSheetList);
+        //     }
+
+        //     return IsValidSheet;
+        // }
         public bool IsValidJson(string filePath)
         {
             try
@@ -915,6 +1048,20 @@ namespace SignalTracker.Controllers
             return mm;
         }
 
+private string GetFormValue(IFormCollection values, string key)
+{
+    if (values == null) return string.Empty;
+    
+    if (values.ContainsKey(key))
+    {
+        var value = values[key];
+        if (!string.IsNullOrEmpty(value))
+        {
+            return value.ToString();
+        }
+    }
+    return string.Empty;
+}
         private int getMonth1(string t)
         {
             t = t.ToLower().Trim();

@@ -5,87 +5,109 @@ using SignalTracker.Models;
 
 namespace SignalTracker.Controllers
 {
-    public class SettingController : Controller
+    [Route("api/[controller]")]
+    [ApiController]
+    public class SettingController : ControllerBase
     {
-        ApplicationDbContext db = null;
-        CommonFunction cf = null;
+        private readonly ApplicationDbContext db;
+        private readonly CommonFunction cf;
+
         public SettingController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor)
         {
             db = context;
             cf = new CommonFunction(context, httpContextAccessor);
         }
-        public IActionResult SettingIndex()
+
+        /// <summary>
+        /// Check if session is valid (API replacement for SettingIndex view).
+        /// </summary>
+        [HttpGet("CheckSession")]
+         
+        public IActionResult CheckSession()
         {
             if (!cf.SessionCheck())
-                return RedirectToAction("Index", "Home");
-            return View();
+            {
+                return Unauthorized(new { Status = 0, Message = "Unauthorized" });
+            }
+
+            return Ok(new { Status = 1, Message = "Session valid" });
         }
-        [HttpGet]
-        public JsonResult GetThresholdSettings()
+
+        /// <summary>
+        /// Get threshold settings for logged-in user (or default).
+        /// </summary>
+        [HttpGet("GetThresholdSettings")]
+        public IActionResult GetThresholdSettings()
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
+
             try
             {
-                cf.SessionCheck();
-                var setting = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
-
-                if (setting == null)
+                if (!cf.SessionCheck())
                 {
-                    setting = db.thresholds.FirstOrDefault(x => x.is_default == 1);
+                    return Unauthorized(new { Status = 0, Message = "Unauthorized" });
                 }
+
+                var setting = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId)
+                              ?? db.thresholds.FirstOrDefault(x => x.is_default == 1);
+
                 message.Status = 1;
-                message.Data= setting;
+                message.Data = setting;
             }
             catch (Exception ex)
             {
-                message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+                message.Status = 0;
+                message.Message = "Error: " + ex.Message;
             }
-            return Json(message);
+
+            return Ok(message);
         }
 
-        [HttpPost]
-        public JsonResult SaveThreshold([FromBody] thresholds model)
+        /// <summary>
+        /// Save or update threshold settings for logged-in user.
+        /// </summary>
+        [HttpPost("SaveThreshold")]
+        public IActionResult SaveThreshold([FromBody] thresholds model)
         {
-            ReturnAPIResponse response = new ReturnAPIResponse();
+            var response = new ReturnAPIResponse();
 
             try
             {
-                if (model != null && cf.SessionCheck())
+                if (model == null || !cf.SessionCheck())
                 {
-                    var existing = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
+                    return BadRequest(new { Status = 0, Message = "Invalid Request" });
+                }
 
-                    if (existing != null)
-                    {
-                        // Update existing
-                        existing.rsrp_json = model.rsrp_json;
-                        existing.rsrq_json = model.rsrq_json;
-                        existing.sinr_json = model.sinr_json;
-                        existing.dl_thpt_json = model.dl_thpt_json;
-                        existing.ul_thpt_json = model.ul_thpt_json;
-                        existing.volte_call = model.volte_call;
-                        existing.lte_bler_json = model.lte_bler_json;
-                        existing.mos_json = model.mos_json;
-                        //existing.is_default = model.is_default;
-                        db.Entry(existing).State=Microsoft.EntityFrameworkCore.EntityState.Modified;
+                var existing = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
 
-                    }
-                    else
-                    {
-                        // Insert new
-                        model.id = 0;
-                        model.is_default = 0;
-                        model.user_id = cf.UserId;
-                        db.thresholds.Add(model);
-                    }
+                if (existing != null)
+                {
+                    // Update existing
+                    existing.rsrp_json = model.rsrp_json;
+                    existing.rsrq_json = model.rsrq_json;
+                    existing.sinr_json = model.sinr_json;
+                    existing.dl_thpt_json = model.dl_thpt_json;
+                    existing.ul_thpt_json = model.ul_thpt_json;
+                    existing.volte_call = model.volte_call;
+                    existing.lte_bler_json = model.lte_bler_json;
+                    existing.mos_json = model.mos_json;
 
-                    db.SaveChanges();
-
-                    response.Status = 1;
-                    response.Message = "Threshold saved successfully.";
-                    response.Data = model.id;
+                    db.Entry(existing).State = Microsoft.EntityFrameworkCore.EntityState.Modified;
                 }
                 else
-                    response.Message = "Invalid Request";
+                {
+                    // Insert new
+                    model.id = 0;
+                    model.is_default = 0;
+                    model.user_id = cf.UserId;
+                    db.thresholds.Add(model);
+                }
+
+                db.SaveChanges();
+
+                response.Status = 1;
+                response.Message = "Threshold saved successfully.";
+                response.Data = model.id;
             }
             catch (Exception ex)
             {
@@ -93,7 +115,7 @@ namespace SignalTracker.Controllers
                 response.Message = "Error: " + ex.Message;
             }
 
-            return Json(response);
+            return Ok(response);
         }
     }
 }

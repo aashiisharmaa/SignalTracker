@@ -245,6 +245,7 @@ E:\SignalTracker\obj\Debug\net6.0\SignalTracker.MvcApplicationPartsAssemblyInfo.
 E:\SignalTracker\obj\Debug\net6.0\SignalTracker.RazorAssemblyInfo.cache
 E:\SignalTracker\obj\Debug\net6.0\SignalTracker.RazorAssemblyInfo.cs
 E:\SignalTracker\obj\Debug\net6.0\EFCoreMySqlNetTopologySuite.cs
+E:\SignalTracker\obj\Debug\net6.0\SignalTracker.sourcelink.json
 E:\SignalTracker\obj\Debug\net6.0\rjimswa.dswa.cache.json
 E:\SignalTracker\obj\Debug\net6.0\rjsmrazor.dswa.cache.json
 E:\SignalTracker\obj\Debug\net6.0\rjsmcshtml.dswa.cache.json

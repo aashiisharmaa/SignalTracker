@@ -388,7 +388,7 @@ namespace SignalTracker.Controllers
                 });
             }
 
-            // If no session, return null or an empty object
+           
             return Json(new { });
         }
         [HttpGet]

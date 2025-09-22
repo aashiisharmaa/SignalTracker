@@ -13,7 +13,7 @@ using Humanizer;
 using System.Linq;
 using System;
 using Newtonsoft.Json;
-using System.Data.Entity;
+
 using System.Drawing;
 using NetTopologySuite;
 using NetTopologySuite.Geometries;
@@ -26,10 +26,12 @@ using System.Linq;
 
 namespace SignalTracker.Controllers
 {
+    [Route("api/[controller]")]
+        [ApiController]
     public class MapViewController : BaseController
     {
         private readonly IWebHostEnvironment _env;
-        
+
         ApplicationDbContext db = null;
         CommonFunction cf = null;
         public MapViewController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IWebHostEnvironment env)
@@ -38,14 +40,14 @@ namespace SignalTracker.Controllers
             _env = env;
             cf = new CommonFunction(context, httpContextAccessor);
         }
-        public IActionResult Index()
-        {
-            if (!cf.SessionCheck())
-                return RedirectToAction("Index", "Home");
-            return View();
-        }
+        // public IActionResult Index()
+        // {
+        //     if (!cf.SessionCheck())
+        //         return RedirectToAction("Index", "Home");
+        //     return View();
+        // }
 
-        
+
         public class UserModel
         {
             public string name { get; set; }
@@ -217,7 +219,7 @@ namespace SignalTracker.Controllers
 
             return Json(message);
         }
-        
+
         [HttpGet]
         public JsonResult GetProjectPolygons(int projectId)
         {
@@ -243,7 +245,7 @@ namespace SignalTracker.Controllers
 
             return Json(result);
         }
-        
+
 
         public class NetworkLogFilters
         {
@@ -264,67 +266,79 @@ namespace SignalTracker.Controllers
 
 
         public class MapFilter
+        {
+            public int session_id { get; set; }
+            public string? NetworkType { get; set; }
+            public DateTime? StartDate { get; set; }
+            public DateTime? EndDate { get; set; }
+            public int page { get; set; } = 1;
+            public int limit { get; set; } = 1000;
+        }
+       // In MapViewController.cs
+
+[HttpGet]
+[Route("GetNetworkLog")] // Explicitly define the route for clarity
+public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
 {
-    public int session_id { get; set; }
-    public string? NetworkType { get; set; }
-    public DateTime? StartDate { get; set; }
-    public DateTime? EndDate { get; set; }
-    public int page { get; set; } = 1;
-    public int limit { get; set; } = 1000;
-}
-        [HttpGet]
-public async Task<JsonResult> GetNetworkLog([FromBody] MapFilter filters)
-{
+    // The session_id check can be removed if you want to allow fetching
+    // logs for multiple sessions based on other criteria in the future.
+    // For now, it's good validation.
     if (filters.session_id <= 0)
     {
         return Json(new List<object>());
     }
 
-    // Start with the base query
-    IQueryable<tbl_network_log> query = db.tbl_network_log
-                                          .Where(log => log.session_id == filters.session_id);
-
-    // Conditionally apply the network type filter
-    if (!string.IsNullOrEmpty(filters.NetworkType) && filters.NetworkType.ToUpper() != "ALL")
+    try
     {
-        query = query.Where(log => log.network == filters.NetworkType);
-    }
+        IQueryable<tbl_network_log> query = db.tbl_network_log
+                                              .Where(log => log.session_id == filters.session_id);
 
-    // Conditionally apply the start date filter
-    if (filters.StartDate.HasValue)
-    {
-        query = query.Where(log => log.timestamp >= filters.StartDate.Value);
-    }
-
-    // Conditionally apply the end date filter
-    if (filters.EndDate.HasValue)
-    {
-        // Add one day to the end date to include all logs on that day
-        var endDate = filters.EndDate.Value.AddDays(1);
-        query = query.Where(log => log.timestamp < endDate);
-    }
-
-    query = query
-        .Skip((filters.page - 1) * filters.limit)
-        .Take(filters.limit)
-        .OrderBy(log => log.timestamp);
-            // Execute the final query
-            var logs = await query
-        .OrderBy(log => log.timestamp)
-        .Select(log => new
+        // Conditionally apply filters
+        if (!string.IsNullOrEmpty(filters.NetworkType) && filters.NetworkType.ToUpper() != "ALL")
         {
-            log.lat,
-            log.lon,
-            log.rsrp,
-            log.rsrq,
-            log.sinr,
-            log.network,
-            log.band,
-            log.timestamp
-        })
-        .ToListAsync();
+            query = query.Where(log => log.network == filters.NetworkType);
+        }
+        if (filters.StartDate.HasValue)
+        {
+            query = query.Where(log => log.timestamp >= filters.StartDate.Value);
+        }
+        if (filters.EndDate.HasValue)
+        {
+            var endDate = filters.EndDate.Value.AddDays(1);
+            query = query.Where(log => log.timestamp < endDate);
+        }
 
-    return Json(logs);
+        // ✅ FIX: Order the data BEFORE applying pagination (Skip/Take)
+        var paginatedQuery = query
+            .OrderBy(log => log.timestamp) // Order first
+            .Skip((filters.page - 1) * filters.limit) // Then skip
+            .Take(filters.limit); // Then take
+
+        // ✅ FIX: The second OrderBy has been REMOVED from here.
+        var logs = await paginatedQuery
+            .Select(log => new
+            {
+                log.session_id, // It's helpful to return the session_id
+                log.lat,
+                log.lon,
+                log.rsrp,
+                log.rsrq,
+                log.sinr,
+                log.network,
+                log.band,
+                log.timestamp
+            })
+            .ToListAsync();
+
+        return Json(logs);
+    }
+    catch (Exception ex)
+    {
+        // For debugging, it's useful to see the error on the server
+        Console.WriteLine($"Error in GetNetworkLog: {ex.Message}");
+        // Return a proper 500 status code with a message
+        return new JsonResult(new { message = "An error occurred on the server." }) { StatusCode = 500 };
+    }
 }
 
 
@@ -665,7 +679,7 @@ public async Task<JsonResult> GetNetworkLog([FromBody] MapFilter filters)
 
             return Json(technologies);
         }
-       
+
         [HttpPost]
         [AllowAnonymous]
         public async Task<JsonResult> log_networkAsync([FromBody] NetworkLogPostModel model)
