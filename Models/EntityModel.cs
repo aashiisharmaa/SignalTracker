@@ -300,7 +300,7 @@ namespace SignalTracker.Models
     {
         public int id { get; set; }
         public string name { get; set; }
-        public string wkt { get; set; }
+        public string? wkt { get; set; }
     }
 
     public class thresholds

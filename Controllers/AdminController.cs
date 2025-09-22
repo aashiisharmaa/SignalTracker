@@ -16,6 +16,7 @@ using System.Security.Claims;
 
 namespace SignalTracker.Controllers
 {
+    [Route("Admin/[action]")]
     public class AdminController : BaseController
     {
         ApplicationDbContext db = null;
@@ -618,7 +619,7 @@ namespace SignalTracker.Controllers
             return Json(message);
         }
         [HttpPost]
-        public JsonResult DeleteUser(int id, string token, string ip)
+        public JsonResult DeleteUser(int id, string ip)
         {
             ReturnAPIResponse message = new ReturnAPIResponse();
             try
@@ -727,8 +728,8 @@ namespace SignalTracker.Controllers
             }
             return View();
         }
-        
-            [HttpGet]
+
+        [HttpGet]
         public async Task<JsonResult> GetAllNetworkLogs()
         {
             try
@@ -736,7 +737,8 @@ namespace SignalTracker.Controllers
                 // A single, efficient query to get all network logs that have a location.
                 var allLogs = await db.tbl_network_log
                     .Where(log => log.lat != null && log.lon != null)
-                    .Select(log => new {
+                    .Select(log => new
+                    {
                         log.session_id,
                         log.lat,
                         log.lon,
@@ -802,48 +804,48 @@ namespace SignalTracker.Controllers
                 return Json(new { Message = "An error occurred on the server: " + ex.Message });
             }
         }
-        [HttpDelete]
-       
-public async Task<IActionResult> DeleteSession(int id)
-{
-    try
-    {
-        // Convert to double (because DB column is float)
-        double sessionId = Convert.ToDouble(id);
 
-        // Find session by matching float
-        var session = await db.tbl_session
-                              .FirstOrDefaultAsync(s => (double)s.id == sessionId);
 
-        if (session == null)
+
+        [HttpDelete("DeleteSession")]
+        public async Task<IActionResult> DeleteSession([FromQuery] string id)
         {
-            return NotFound(new { success = false, message = "Session not found." });
+            try
+            {
+        Console.WriteLine("Hello, World!");
+        if (!int.TryParse(id, out int sessionId))
+        return BadRequest("Invalid session id");
+        // int sed = Convert.ToInt32(id);
+        var session = await db.tbl_session.FindAsync(sessionId);
+
+                if (session == null)
+                {
+                    return NotFound(new { success = false, message = "Session not found." });
+                }
+
+                var logs = await db.tbl_network_log
+                    .Where(l => l.session_id == sessionId)
+                    .ToListAsync();
+
+                if (logs.Any())
+                {
+                    db.tbl_network_log.RemoveRange(logs);
+                }
+
+                db.tbl_session.Remove(session);
+                await db.SaveChangesAsync();
+
+                return Ok(new { success = true, message = "Session deleted successfully." });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new
+                {
+                    success = false,
+                    message = "An error occurred: " + ex.Message
+                });
+            }
         }
-
-        // Delete related logs using float match
-        var logs = await db.tbl_network_log
-                           .Where(l => (double)l.session_id == sessionId)
-                           .ToListAsync();
-
-        if (logs.Any())
-        {
-            db.tbl_network_log.RemoveRange(logs);
-        }
-
-        db.tbl_session.Remove(session);
-        await db.SaveChangesAsync();
-
-        return Ok(new { success = true, message = "Session deleted successfully." });
-    }
-    catch (Exception ex)
-    {
-        return StatusCode(500, new
-        {
-            success = false,
-            message = "An error occurred while deleting the session: " + ex.Message
-        });
-    }
-}
 
 
         #endregion

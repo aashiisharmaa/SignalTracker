@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("SignalTracker")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1b59e851523e3ae04522cef2a52e0111afcff5d2")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+a2b9618b900c929b119236cfd09a7eba73ffb07d")]
 [assembly: System.Reflection.AssemblyProductAttribute("SignalTracker")]
 [assembly: System.Reflection.AssemblyTitleAttribute("SignalTracker")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
