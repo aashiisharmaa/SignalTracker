@@ -40,12 +40,7 @@ namespace SignalTracker.Controllers
             _env = env;
             cf = new CommonFunction(context, httpContextAccessor);
         }
-        // public IActionResult Index()
-        // {
-        //     if (!cf.SessionCheck())
-        //         return RedirectToAction("Index", "Home");
-        //     return View();
-        // }
+        
 
 
         public class UserModel
@@ -274,7 +269,7 @@ namespace SignalTracker.Controllers
             public int page { get; set; } = 1;
             public int limit { get; set; } = 1000;
         }
-       // In MapViewController.cs
+      
 
 [HttpGet]
 [Route("GetNetworkLog")] // Explicitly define the route for clarity
@@ -326,7 +321,12 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
                 log.sinr,
                 log.network,
                 log.band,
-                log.timestamp
+                log.timestamp,
+                log.dl_tpt,
+                log.ul_tpt,
+                log.m_alpha_long, // include provider in response
+                log.mos,
+                log.volte_call
             })
             .ToListAsync();
 
@@ -635,6 +635,82 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
         }
 
 
+        public class LogFilterModel
+{
+    public DateTime? StartDate { get; set; }
+    public DateTime? EndDate { get; set; }
+    // New optional provider filter (matches m_alpha_long in tbl_network_log)
+    public string? Provider { get; set; }
+    // You can add more filters here later (e.g., NetworkType, Provider)
+}
+
+[HttpGet]
+[Route("GetLogsByDateRange")] // A new, dedicated route
+public async Task<JsonResult> GetLogsByDateRange([FromQuery] LogFilterModel filters)
+{
+    try
+    {
+        // Start with the base query for all network logs
+        IQueryable<tbl_network_log> query = db.tbl_network_log;
+
+        // Apply StartDate filter if provided
+        if (filters.StartDate.HasValue)
+        {
+            query = query.Where(log => log.timestamp >= filters.StartDate.Value);
+        }
+
+        // Apply EndDate filter if provided
+        if (filters.EndDate.HasValue)
+        {
+            // Add 1 day to the end date to include all logs on that day
+            var endDate = filters.EndDate.Value.AddDays(1);
+            query = query.Where(log => log.timestamp < endDate);
+        }
+
+        // Apply Provider filter if provided (matches m_alpha_long column)
+        if (!string.IsNullOrEmpty(filters.Provider))
+        {
+            query = query.Where(log => log.m_alpha_long == filters.Provider);
+        }
+
+        // IMPORTANT: To prevent crashing the server and browser,
+        // limit the number of points returned in a single request.
+        // 20,000 is a reasonable limit. You can adjust this.
+        var logs = await query
+            .OrderBy(log => log.timestamp) // Ordering is good practice
+            .Take(20000) // Apply the limit
+            .Select(log => new
+            {
+                log.session_id,
+                log.lat,
+                log.lon,
+                log.rsrp,
+                log.rsrq,
+                log.sinr,
+                log.network,
+                log.band,
+                log.timestamp,
+                provider = log.m_alpha_long,
+                log.dl_tpt,
+        log.ul_tpt,
+        log.mos // include provider in response
+            })
+            .ToListAsync();
+
+        if (!logs.Any())
+        {
+            return Json(new List<object>()); // Return empty array if no results
+        }
+
+        return Json(logs);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error in GetLogsByDateRange: {ex.Message}");
+        return new JsonResult(new { message = "An error occurred on the server." }) { StatusCode = 500 };
+    }
+}
+
         public class NetworkLogPostModel
         {
             [JsonPropertyName("sessionid")]
@@ -647,6 +723,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
         // SignalTracker/Controllers/MapViewController.cs
 
         [HttpGet]
+        [Route("GetProviders")]
         public JsonResult GetProviders()
         {
             var providerNames = db.tbl_network_log
@@ -664,6 +741,7 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
         }
 
         [HttpGet]
+        [Route("GetTechnologies")]
         public JsonResult GetTechnologies()
         {
             var technologyNames = db.tbl_network_log
@@ -680,6 +758,39 @@ public async Task<JsonResult> GetNetworkLog([FromQuery] MapFilter filters)
             return Json(technologies);
         }
 
+[HttpGet]
+[Route("GetBands")]
+public JsonResult GetBands()
+{
+    try
+    {
+        // Get distinct band values from network logs, excluding null/empty values
+        var bandNames = db.tbl_network_log
+            .Where(b => !string.IsNullOrEmpty(b.band))
+            .Select(b => b.band)
+            .Distinct()
+            .ToList();
+
+        // Format the bands for the frontend
+        var bands = bandNames
+            .Select((name, index) => new { id = index + 1, name })
+            .ToList();
+
+        return Json(bands);
+    }
+    catch (Exception ex)
+    {
+        // Log the error for debugging
+        Console.WriteLine($"Error in GetBands: {ex.Message}");
+        
+        // Return a proper error response
+        return new JsonResult(new { 
+            status = 0, 
+            message = "Error fetching bands data",
+            error = ex.Message 
+        }) { StatusCode = 500 };
+    }
+}
         [HttpPost]
         [AllowAnonymous]
         public async Task<JsonResult> log_networkAsync([FromBody] NetworkLogPostModel model)

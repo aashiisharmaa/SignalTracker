@@ -783,6 +783,9 @@ namespace SignalTracker.Controllers
                         // CRITICAL: Including the start location
                         start_lat = s.start_lat,
                         start_lon = s.start_lon,
+                        end_lat = (double?)s.end_lat,
+                        end_lon = (double?)s.end_lon,
+                        capture_frequency = (double?)s.capture_frequency,
 
                         // User details joined from the user table
                         CreatedBy = u.name,
@@ -790,7 +793,11 @@ namespace SignalTracker.Controllers
                         make = u.make,
                         model = u.model,
                         os = u.os,
-                        operator_name = u.operator_name
+                        operator_name = u.operator_name,
+                        distance_km = s.distance,
+                        start_address = s.start_address,
+                        end_address = s.end_address
+
                     })
                     .ToListAsync();
 
@@ -806,17 +813,121 @@ namespace SignalTracker.Controllers
         }
 
 
+       [HttpGet]
+public async Task<JsonResult> GetSessionsByDateRange(string startDateIso, string endDateIso)
+{
+    try
+    {
+        if (!DateTime.TryParse(startDateIso, out DateTime startDate) ||
+            !DateTime.TryParse(endDateIso, out DateTime endDate))
+        {
+            return Json(new { success = false, Message = "Invalid date format" });
+        }
+
+        endDate = endDate.Date.AddDays(1).AddTicks(-1);
+
+        // --- Step 1: Fetch the main session and user data that matches the date range ---
+        var sessionsData = await (
+            from s in db.tbl_session
+            join u in db.tbl_user on s.user_id equals u.id
+            where s.start_time.HasValue && s.start_time.Value >= startDate && s.start_time.Value <= endDate
+            select new
+            {
+                // Session info
+                id = s.id,
+                session_name = "Session " + s.id,
+                start_time = s.start_time,
+                end_time = s.end_time,
+                notes = s.notes,
+                start_lat = (double?)s.start_lat,
+                start_lon = s.start_lon,
+                end_lat = s.end_lat,
+                end_lon = s.end_lon,
+                capture_frequency = s.capture_frequency,
+                distance_km = s.distance,
+                start_address = s.start_address,
+                end_address = s.end_address,
+
+                // User info
+                CreatedBy = u.name,
+                mobile = u.mobile,
+                make = u.make,
+                model = u.model,
+                os = u.os,
+                operator_name = u.operator_name
+            })
+            .ToListAsync(); // Execute the first query and bring sessions into memory
+
+        // --- Step 2: Efficiently fetch all related logs in a single, separate query ---
+        var sessionIds = sessionsData.Select(s => s.id).ToList();
+        
+        var allLogsForSessions = await db.tbl_network_log
+            .Where(log => sessionIds.Contains(log.session_id))
+            .ToListAsync();
+
+        // Group the logs by session_id in memory for fast lookups
+        var logsLookup = allLogsForSessions.ToLookup(log => log.session_id);
+
+        // --- Step 3: Combine the sessions and their logs in your application code ---
+        var finalResult = sessionsData.Select(s => new
+        {
+            // Copy all the session and user properties
+            s.id,
+            s.session_name,
+            s.start_time,
+            s.end_time,
+            s.notes,
+            s.start_lat,
+            s.start_lon,
+            s.end_lat,
+            s.end_lon,
+            s.capture_frequency,
+            s.distance_km,
+            s.start_address,
+            s.end_address,
+            s.CreatedBy,
+            s.mobile,
+            s.make,
+            s.model,
+            s.os,
+            s.operator_name,
+
+            // Assign the looked-up logs to each session
+            Logs = logsLookup[s.id].Select(l => new
+            {
+                l.lat,
+                l.lon,
+                l.rsrp,
+                l.rsrq,
+                l.sinr,
+                l.ul_tpt,
+                l.dl_tpt,
+                l.band,
+                l.network,
+                l.m_alpha_long,
+                l.timestamp
+            }).ToList()
+        }).ToList();
+
+        return Json(finalResult);
+    }
+    catch (Exception ex)
+    {
+        Response.StatusCode = 500;
+        return Json(new { Message = "Error fetching sessions: " + ex.Message });
+    }
+}
 
         [HttpDelete("DeleteSession")]
         public async Task<IActionResult> DeleteSession([FromQuery] string id)
         {
             try
             {
-        Console.WriteLine("Hello, World!");
-        if (!int.TryParse(id, out int sessionId))
-        return BadRequest("Invalid session id");
-        // int sed = Convert.ToInt32(id);
-        var session = await db.tbl_session.FindAsync(sessionId);
+                Console.WriteLine("Hello, World!");
+                if (!int.TryParse(id, out int sessionId))
+                    return BadRequest("Invalid session id");
+                // int sed = Convert.ToInt32(id);
+                var session = await db.tbl_session.FindAsync(sessionId);
 
                 if (session == null)
                 {
