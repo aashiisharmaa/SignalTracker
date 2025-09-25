@@ -274,17 +274,7 @@ namespace SignalTracker.Controllers
                 var networkLogs = db.tbl_network_log
                     .Where(x => x.rsrp != null && x.sinr != null && x.m_alpha_long != null);
 
-                /*var avgRsrpSinrPerOperator_bar = networkLogs
-                    .Where(x => x.rsrp != null && x.sinr != null)
-                    .GroupBy(x => x.m_alpha_long)
-                    .Select(g => new
-                    {
-                        Operator = g.Key,
-                        AvgRSRP = Math.Round(g.Average(x => x.rsrp.Value), 2),
-                        AvgSINR = Math.Round(g.Average(x => x.sinr.Value), 2)
-                    })
-                    .ToList();
-                */
+                
 
                 var avgRsrpSinrPerOperator_bar = networkLogs
                     .Where(x => x.rsrp != null && x.sinr != null)
@@ -759,6 +749,56 @@ namespace SignalTracker.Controllers
                 return Json(new { Message = "An error occurred on the server: " + ex.Message });
             }
         }
+
+
+        // In AdminController
+
+[HttpGet]
+public async Task<JsonResult> GetOperatorCoverageRanking(double min = -95, double max = 0)
+{
+    try
+    {
+        // RSRP is negative; range e.g., [-95, 0]
+        var result = await db.tbl_network_log
+            .AsNoTracking()
+            .Where(l => l.rsrp.HasValue && l.m_alpha_long != null && l.rsrp.Value >= min && l.rsrp.Value <= max)
+            .GroupBy(l => l.m_alpha_long)
+            .Select(g => new { name = g.Key, count = g.Count() })
+            .OrderByDescending(x => x.count)
+            .ToListAsync();
+
+        return Json(result);
+    }
+    catch (Exception ex)
+    {
+        Response.StatusCode = 500;
+        return Json(new { Message = "Error: " + ex.Message });
+    }
+}
+
+[HttpGet]
+public async Task<JsonResult> GetOperatorQualityRanking(double min = -10, double max = 0)
+{
+    try
+    {
+        // RSRQ is also typically negative; range e.g., [-10, 0]
+        var result = await db.tbl_network_log
+            .AsNoTracking()
+            .Where(l => l.rsrq.HasValue && l.m_alpha_long != null && l.rsrq.Value >= min && l.rsrq.Value <= max)
+            .GroupBy(l => l.m_alpha_long)
+            .Select(g => new { name = g.Key, count = g.Count() })
+            .OrderByDescending(x => x.count)
+            .ToListAsync();
+
+        return Json(result);
+    }
+    catch (Exception ex)
+    {
+        Response.StatusCode = 500;
+        return Json(new { Message = "Error: " + ex.Message });
+    }
+}
+
 
 
         [HttpGet]
