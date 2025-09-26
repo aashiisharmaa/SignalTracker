@@ -27,7 +27,7 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp", policy =>
     {
-        policy.WithOrigins("http://localhost:5173")
+        policy.WithOrigins("http://localhost:5173","https://deluxe-lily-ad7565.netlify.app/")
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
