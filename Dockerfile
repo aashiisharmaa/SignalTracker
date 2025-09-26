@@ -2,7 +2,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:6.0 AS build
 WORKDIR /source
 
-# Copy the solution and project files
+# Copy the solution and project files first to leverage Docker caching
 COPY *.sln .
 COPY SignalTracker/*.csproj ./SignalTracker/
 
