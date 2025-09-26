@@ -1,6 +1,4 @@
-﻿// FILE: SignalTracker/Program.cs
-
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using System.Threading.Tasks;
@@ -8,7 +6,6 @@ using System.Threading.Tasks;
 var builder = WebApplication.CreateBuilder(args);
 
 // --- 1. Add Services to the Container ---
-
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllersWithViews().AddJsonOptions(options =>
 {
@@ -41,32 +38,19 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseMySql(connectionString, serverVersion)
 );
 
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("AllowReactApp", policy =>
-    {
-        policy.WithOrigins(
-                "http://localhost:5173",                   // for local development
-                "https://your-frontend-url.netlify.app"   // for deployed frontend
-            )
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
-    });
-});
-
-
 builder.Services.AddAuthorization();
 
-// ✨ KEY FIX: Register your custom services here.
-// Controllers do NOT need to be registered manually.
+// ✨ KEY FIX: Register your custom services here
 builder.Services.AddScoped<CommonFunction>();
 
+// --- 2. Configure Kestrel to use Render port ---
+var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 
-// --- 2. Configure the HTTP Request Pipeline ---
-var app = builder.Build(); // Build the app AFTER all services are registered.
+// --- 3. Build the app ---
+var app = builder.Build();
 
-// Configure the rest of the pipeline
+// Configure the HTTP request pipeline
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Home/Error");
