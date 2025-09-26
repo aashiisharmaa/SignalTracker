@@ -41,18 +41,20 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseMySql(connectionString, serverVersion)
 );
 
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-    .AddCookie(options =>
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowReactApp", policy =>
     {
-        options.Cookie.Name = "SignalTracker.AuthCookie";
-        options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
-        options.SlidingExpiration = true;
-        options.Events.OnRedirectToLogin = context =>
-        {
-            context.Response.StatusCode = 401;
-            return Task.CompletedTask;
-        };
+        policy.WithOrigins(
+                "http://localhost:5173",                   // for local development
+                "https://your-frontend-url.netlify.app"   // for deployed frontend
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
     });
+});
+
 
 builder.Services.AddAuthorization();
 
