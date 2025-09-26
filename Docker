@@ -2,9 +2,18 @@
 FROM mcr.microsoft.com/dotnet/sdk:6.0 AS build
 WORKDIR /source
 
-# Copy the project files and restore dependencies
-COPY . .
-RUN dotnet restore "SignalTracker.csproj"
+# Copy the solution and project files
+COPY *.sln .
+COPY SignalTracker/*.csproj ./SignalTracker/
+
+# Restore dependencies
+RUN dotnet restore "SignalTracker/SignalTracker.csproj"
+
+# Copy the rest of the source code
+COPY SignalTracker/. ./SignalTracker/
+
+# Publish the application
+WORKDIR /source/SignalTracker
 RUN dotnet publish "SignalTracker.csproj" -c Release -o /app/publish
 
 # Use the official ASP.NET Core runtime image for the final, smaller image
