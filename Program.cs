@@ -28,7 +28,9 @@ builder.Services.AddCors(options =>
     {
         policy.WithOrigins(
                 "http://localhost:5173",
-                "https://deluxe-lily-ad7565.netlify.app" // <- remove trailing slash
+                "https://deluxe-lily-ad7565.netlify.app",
+                "https://54.146.235.231",
+                "http://localhost:80"
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
