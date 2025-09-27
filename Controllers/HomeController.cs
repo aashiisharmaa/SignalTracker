@@ -17,6 +17,7 @@ using System.Xml.Linq;
 
 namespace SignalTracker.Controllers
 {
+    [Route("Home")]
     public class HomeController : Controller
     {
         private readonly ApplicationDbContext _db;
@@ -82,8 +83,7 @@ namespace SignalTracker.Controllers
         {
             return View();
         }
-        [HttpPost]
-        //call from Login
+        [HttpPost("GetStateIformation")]
         public JsonResult GetStateIformation()
         {
             const string src = "abcdefghijklmnopqrstuvwxyz0123456789";
@@ -98,75 +98,58 @@ namespace SignalTracker.Controllers
             HttpContext.Session.SetString("salt", sb.ToString());
             return Json(sb.ToString());
         }
-        [HttpPost]
-        //Call from Index
-        [HttpPost]
-        //Call from Index
-        [HttpPost]
-         public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
-{
-    try
-    {
-        // NOTE: In a real application, passwords MUST be hashed.
-        var userDetails = await _db.tbl_user.FirstOrDefaultAsync(u => u.email == obj.Email && u.isactive == 1);
-
-        if (userDetails != null)
+        [HttpPost("UserLogin")]
+        public async Task<JsonResult> UserLogin([FromBody] LoginData obj)
         {
-            // --- THIS SECTION IS THE MOST IMPORTANT PART ---
-            // Create the security claims that identify the user.
-            var claims = new List<Claim>
+            try
             {
-                // This is the primary claim the system uses to identify the user.
-                new Claim(ClaimTypes.Name, userDetails.email),
-                
-                // You can add other useful information as claims.
-                new Claim("UserId", userDetails.id.ToString()),
-                new Claim(ClaimTypes.Role, "User") // Example role
-            };
+                if (obj == null || string.IsNullOrWhiteSpace(obj.Email) || string.IsNullOrWhiteSpace(obj.Password))
+                    return Json(new { success = false, message = "Email and password are required." });
 
-            var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
-            var authProperties = new AuthenticationProperties
-            {
-                // Allows the user to stay logged in even after closing the browser.
-                IsPersistent = true
-            };
+                // TODO: hash and compare securely in production
+                var user = await _db.tbl_user.FirstOrDefaultAsync(u => u.email == obj.Email && u.isactive == 1);
+                if (user == null || user.password != obj.Password)
+                    return Json(new { success = false, message = "Invalid email or password!" });
 
-            // This command creates the encrypted cookie and signs the user in.
-            await HttpContext.SignInAsync(
-                CookieAuthenticationDefaults.AuthenticationScheme,
-                new ClaimsPrincipal(claimsIdentity),
-                authProperties);
-            // --- END OF IMPORTANT SECTION ---
-
-            // Set any additional server-side session data you need
-            HttpContext.Session.SetString("UserName", userDetails.name);
-            HttpContext.Session.SetInt32("UserID", userDetails.id);
-
-            var userData = new
-            {
-                id = userDetails.id,
-                name = userDetails.name,
-                email = userDetails.email,
-                m_user_type_id = userDetails.m_user_type_id,
-            };
-
-            return Json(new { success = true, user = userDetails });
-        }
-        else
+                var claims = new List<Claim>
         {
-            return Json(new { success = false, message = "Invalid username or password!" });
-        }
-    }
-    catch (Exception ex)
-    {
-        var writelog = new Writelog(_db);
-        writelog.write_exception_log(0, "Home", "UserLogin", DateTime.Now, ex);
-        return Json(new { success = false, message = "An error occurred. Please try again." });
-    }
-}
+            new Claim(ClaimTypes.Name, user.email),
+            new Claim("UserId", user.id.ToString()),
+            new Claim("UserTypeId", user.m_user_type_id.ToString()),
+            new Claim(ClaimTypes.Role, "User")
+        };
 
-   
-        [HttpPost]
+                var claimsIdentity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
+                await HttpContext.SignInAsync(
+                    CookieAuthenticationDefaults.AuthenticationScheme,
+                    new ClaimsPrincipal(claimsIdentity),
+                    new AuthenticationProperties { IsPersistent = true });
+
+                // Keep these consistent: store email in "UserName"
+                HttpContext.Session.SetString("UserName", user.email);
+                HttpContext.Session.SetInt32("UserID", user.id);
+                HttpContext.Session.SetInt32("UserType", user.m_user_type_id);
+
+                var userDto = new
+                {
+                    id = user.id,
+                    name = user.name,
+                    email = user.email,
+                    m_user_type_id = user.m_user_type_id
+                };
+
+                return Json(new { success = true, user = userDto });
+            }
+            catch (Exception ex)
+            {
+                var writelog = new Writelog(_db);
+                writelog.write_exception_log(0, "Home", "UserLogin", DateTime.Now, ex);
+                return Json(new { success = false, message = "An error occurred. Please try again." });
+            }
+        }
+
+
+        [HttpPost("GetUserForgotPassword")]
         public JsonResult GetUserForgotPassword([FromBody] LoginData obj)
         {
             ReturnMessage message = new ReturnMessage();
@@ -253,8 +236,7 @@ namespace SignalTracker.Controllers
             //}
             return View();
         }
-        [HttpPost]
-        //call from Login
+        [HttpPost("ForgotResetPassword")]
         public JsonResult ForgotResetPassword([FromBody] ResetPasswordModel model)
         {
             ReturnMessage ret = new ReturnMessage();
@@ -304,12 +286,12 @@ namespace SignalTracker.Controllers
             }
             return Json(ret);
         }
+        [HttpGet("Logout")]
         public async Task<IActionResult> Logout(string IP)
         {
             try
             {
                 var username = HttpContext?.Session.GetString("UserName");
-
                 if (!string.IsNullOrEmpty(username))
                 {
                     var objAudit = new tbl_user_login_audit_details
@@ -317,81 +299,60 @@ namespace SignalTracker.Controllers
                         date_of_creation = DateTime.Now,
                         ip_address = IP,
                         username = username,
-                        login_status = 2 // Assuming '2' means logout
+                        login_status = 2
                     };
-
                     _db.tbl_user_login_audit_details.Add(objAudit);
                     await _db.SaveChangesAsync();
-
-                    var user = await _db.tbl_user.FirstOrDefaultAsync(a => a.email == username);
-                    if (user != null)
-                    {
-                        // Your existing commented-out logic for setting is_loggedin = false would go here if needed.
-                    }
                 }
             }
             catch (Exception ex)
             {
-                // --- Start of Completed Catch Block ---
-
-                // 1. Log the exception for debugging purposes.
-                // This will help you diagnose issues, for example, if the audit table has a problem.
                 Writelog writelog = new Writelog(_db);
                 writelog.write_exception_log(0, "HomeController", "Logout", DateTime.Now, ex);
-
-                // 2. We intentionally do NOT stop the logout process.
-                // Even if logging fails, the user must be logged out.
-
-                // --- End of Completed Catch Block ---
             }
 
-            // --- Critical Logout Steps ---
-            // These are correctly placed outside the try-catch to ensure they ALWAYS run.
-
-            // Clear the server-side session
             HttpContext.Session.Clear();
-
-            // Clear authentication cookies from the browser
             foreach (var cookie in Request.Cookies.Keys)
-            {
                 Response.Cookies.Delete(cookie);
-            }
 
-            // Formally sign the user out of the authentication scheme
-            await HttpContext.SignOutAsync();
-
-            // Redirect the user to the home page
+            await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
             return RedirectToAction("Index", "Home");
         }
-        // Clear session
 
         #endregion
-        [HttpPost]
-        [HttpPost]
-        public JsonResult GetLoggedUser(string ip)
+        [HttpPost("GetLoggedUser")]
+        public JsonResult GetLoggedUser(string? ip = null)
         {
-            // Use the session check to see if a user is logged in
-            if (cf.SessionCheck())
+            bool isAuth = User?.Identity?.IsAuthenticated == true || (cf?.SessionCheck() ?? false);
+            if (!isAuth) return Json(new { });
+
+            var email = User?.FindFirstValue(ClaimTypes.Name)
+                        ?? HttpContext.Session.GetString("UserName")
+                        ?? string.Empty;
+
+            int? userId = null;
+            var userIdStr = User?.FindFirstValue("UserId");
+            if (!string.IsNullOrEmpty(userIdStr) && int.TryParse(userIdStr, out var uid))
+                userId = uid;
+            else
+                userId = HttpContext.Session.GetInt32("UserID");
+
+            int? userTypeId = null;
+            var userTypeStr = User?.FindFirstValue("UserTypeId");
+            if (!string.IsNullOrEmpty(userTypeStr) && int.TryParse(userTypeStr, out var ut))
+                userTypeId = ut;
+            else
+                userTypeId = HttpContext.Session.GetInt32("UserType");
+
+            return Json(new
             {
-                // If they are, get their details from the session
-                var emailid = HttpContext.Session.GetString("UserName") ?? string.Empty; // Use UserName as set during login
-                var userId = HttpContext.Session.GetInt32("UserID");
-                var userTypeId = HttpContext.Session.GetInt32("UserType");
-
-                // Return the logged-in user's data
-                return Json(new
-                {
-                    id = userId,
-                    name = emailid, // We'll use the email as the name for now
-                    email = emailid,
-                    m_user_type_id = userTypeId
-                });
-            }
-
-           
-            return Json(new { });
+                id = userId,
+                name = email,
+                email = email,
+                m_user_type_id = userTypeId
+            });
         }
-        [HttpGet]
+        [HttpGet("GetMasterUserTypes")]
         public JsonResult GetMasterUserTypes()
         {
             var typeList = _db.m_user_type.ToList();

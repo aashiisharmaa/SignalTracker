@@ -1,10 +1,13 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿// FILE: SignalTracker/Program.cs
+
+using Microsoft.EntityFrameworkCore;
 using SignalTracker.Models;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using System.Threading.Tasks;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- 1. Add Services ---
+// Services
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddControllersWithViews().AddJsonOptions(options =>
 {
@@ -19,14 +22,13 @@ builder.Services.AddSession(options =>
     options.Cookie.IsEssential = true;
 });
 
-// --- 1a. CORS ---
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowReactApp", policy =>
     {
         policy.WithOrigins(
-                "https://deluxe-lily-ad7565.netlify.app",
-                "http://localhost:5173"
+                "http://localhost:5173",
+                "https://deluxe-lily-ad7565.netlify.app" // <- remove trailing slash
             )
             .AllowAnyHeader()
             .AllowAnyMethod()
@@ -34,24 +36,32 @@ builder.Services.AddCors(options =>
     });
 });
 
-// --- 1b. DbContext ---
+// DbContext
 var serverVersion = new MySqlServerVersion(new Version(8, 0, 29));
 var connectionString = builder.Configuration.GetConnectionString("MySqlConnection");
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseMySql(connectionString, serverVersion)
 );
 
+// Auth
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.Cookie.Name = "SignalTracker.AuthCookie";
+        options.ExpireTimeSpan = TimeSpan.FromMinutes(300);
+        options.SlidingExpiration = true;
+        options.Events.OnRedirectToLogin = context =>
+        {
+            context.Response.StatusCode = 401;
+            return Task.CompletedTask;
+        };
+    });
+
 builder.Services.AddAuthorization();
 builder.Services.AddScoped<CommonFunction>();
 
-// --- 2. Kestrel for Render ---
-var port = Environment.GetEnvironmentVariable("PORT") ?? "5000";
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
-
-// --- 3. Build app ---
 var app = builder.Build();
 
-// --- 4. Middleware pipeline ---
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Home/Error");
@@ -61,22 +71,17 @@ if (!app.Environment.IsDevelopment())
 app.UseStaticFiles();
 app.UseRouting();
 
-// ✅ CORS MUST come before Authentication & Authorization
 app.UseCors("AllowReactApp");
-
 app.UseSession();
 app.UseAuthentication();
 app.UseAuthorization();
 
-// --- 5. Map controllers ---
-app.MapControllers(); // ensure API endpoints are mapped
 
 app.MapControllerRoute(
     name: "default",
     pattern: "{controller=Home}/{action=Index}/{id?}"
 );
 
-// --- 6. Handle SPA fallback (optional if serving frontend from backend) ---
-app.MapFallbackToFile("index.html");
+
 
 app.Run();

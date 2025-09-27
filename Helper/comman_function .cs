@@ -22,48 +22,87 @@ public class CommonFunction
 {
     private readonly ApplicationDbContext db;
     private readonly IHttpContextAccessor _httpContextAccessor;
-    public int UserId = 0;
-    public int UserType = 0;
-    public string UserName = "";
+
+    public int UserId { get; private set; } = 0;
+    public int UserType { get; private set; } = 0;
+    public string UserName { get; private set; } = "";
 
     public CommonFunction(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor)
     {
         db = context;
         _httpContextAccessor = httpContextAccessor;
-        if (_httpContextAccessor != null && _httpContextAccessor.HttpContext!=null)
-        {
-            var uId= _httpContextAccessor.HttpContext.Session.GetInt32("UserID");
-            var uType = _httpContextAccessor.HttpContext.Session.GetString("UserType");
-            var uName = _httpContextAccessor.HttpContext.Session.GetString("UserName");
 
-            if (uId != null) UserId=(int)uId;
-            if (!string.IsNullOrEmpty(uType)) UserType = Convert.ToInt32(uType);
-            if (!string.IsNullOrEmpty(uName)) _ = uName;
+        var http = _httpContextAccessor?.HttpContext;
+        var session = http?.Session;
+        if (session == null) return;
+
+        // UserID
+        UserId = session.GetInt32("UserID") ?? 0;
+
+        // UserType (prefer int; fallback to string with TryParse)
+        var userTypeInt = session.GetInt32("UserType");
+        if (userTypeInt.HasValue)
+        {
+            UserType = userTypeInt.Value;
+        }
+        else
+        {
+            var uTypeStr = session.GetString("UserType");
+            if (!string.IsNullOrWhiteSpace(uTypeStr) && int.TryParse(uTypeStr, out var parsed))
+            {
+                UserType = parsed;
+                // normalize to int in session for future reads
+                session.SetInt32("UserType", parsed);
+            }
+            else
+            {
+                // remove bad value if present and default
+                session.Remove("UserType");
+                UserType = 0;
+            }
+        }
+
+        // UserName (actually assign it)
+        var uName = session.GetString("UserName");
+        if (!string.IsNullOrWhiteSpace(uName))
+        {
+            UserName = uName!;
+        }
+        else
+        {
+            // fallback to identity name if available
+            var identityName = http?.User?.Identity?.Name;
+            if (!string.IsNullOrWhiteSpace(identityName))
+                UserName = identityName!;
         }
     }
 
-    public bool SessionCheck( string userType="")
+    public bool SessionCheck(string userType = "")
     {
         var httpContext = _httpContextAccessor.HttpContext;
-        if (httpContext !=null && httpContext.User!=null && httpContext.User.Identity!=null && httpContext.User.Identity.IsAuthenticated)
+        if (httpContext != null && httpContext.User?.Identity?.IsAuthenticated == true)
         {
-            var userEmail = httpContext.User.Identity.Name;
+            var userEmail = httpContext.User.Identity!.Name;
             var user = db.tbl_user.FirstOrDefault(u => u.email == userEmail && u.isactive == 1);
-
-            if (user != null) /*&& user.is_loggedin*/
+            if (user != null)
             {
-                httpContext.Session.SetString("Email", user.email);
-                httpContext.Session.SetString("UserName", user.name);
+                httpContext.Session.SetString("Email", user.email ?? "");
+                httpContext.Session.SetString("UserName", user.name ?? "");
                 httpContext.Session.SetInt32("UserID", user.id);
-                httpContext.Session.SetString("UserType", user.m_user_type_id.ToString());
-                httpContext.Session.SetString("LastLogin", user.last_login==null?"":((DateTime)user.last_login).ToString("dd MMM hh:mm tt"));
+                httpContext.Session.SetInt32("UserType", user.m_user_type_id); // store as int
+                httpContext.Session.SetString("LastLogin", user.last_login?.ToString("dd MMM hh:mm tt") ?? "");
 
+                UserId = user.id;
                 UserType = user.m_user_type_id;
-                if(!string.IsNullOrEmpty(userType))
+                UserName = user.name ?? "";
+
+                if (!string.IsNullOrEmpty(userType))
                 {
-                    if(userType.Contains("" + UserType))
-                        return true;
-                    else return false;
+                    // supports "1" or "1,2,3"
+                    var allowed = userType.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                                          .Select(s => s.Trim())
+                                          .Any(s => s == UserType.ToString());
+                    return allowed;
                 }
                 return true;
             }
@@ -74,10 +113,13 @@ public class CommonFunction
     public string CreateToken(string ip)
     {
         var httpContext = _httpContextAccessor.HttpContext;
-        var email = httpContext.Session.GetString("Email");
+        var email = httpContext?.Session.GetString("Email");
         if (!string.IsNullOrEmpty(email) && SessionCheck())
         {
-            var tokenData = $"{httpContext.Session.GetInt32("UserID")}#{httpContext.Session.GetString("UserType")}#{ip}#{DateTime.Now:MM-dd-yyyy HH:mm:ss}";
+            var uid = httpContext!.Session.GetInt32("UserID") ?? 0;
+            var utype = httpContext.Session.GetInt32("UserType") ?? 0;
+
+            var tokenData = $"{uid}#{utype}#{ip}#{DateTime.Now:MM-dd-yyyy HH:mm:ss}";
             var token = AESEncrytDecry.Encrypt(tokenData);
             httpContext.Session.SetString("token", token);
 
@@ -91,33 +133,36 @@ public class CommonFunction
         }
         return string.Empty;
     }
+
     public ReturnAPIResponse MatchToken(string token)
     {
-        ReturnAPIResponse objRet = new ReturnAPIResponse();
-        objRet.Status = 0;
-        objRet.Message = "Invalid token, kindly login again.";
+        var objRet = new ReturnAPIResponse { Status = 0, Message = "Invalid token, kindly login again." };
         var httpContext = _httpContextAccessor.HttpContext;
 
         if (SessionCheck())
         {
-            
-
-            string ServerToken = httpContext.Session.GetString("token") + "";
-            string user_type = httpContext.Session.GetString("UserType") + "";
-            if (!string.IsNullOrEmpty(user_type))
+            var session = httpContext!.Session;
+            var serverToken = session.GetString("token") ?? "";
+            var userTypeInt = session.GetInt32("UserType");
+            if (userTypeInt.HasValue)
+                objRet.UserType = userTypeInt.Value;
+            else
             {
-                objRet.UserType = Convert.ToInt32(user_type);
+                var userTypeStr = session.GetString("UserType");
+                if (int.TryParse(userTypeStr, out var parsed))
+                    objRet.UserType = parsed;
             }
-            if (string.IsNullOrEmpty(ServerToken))
+
+            if (string.IsNullOrEmpty(serverToken))
             {
-                string Email = httpContext.Session.GetString("Email") + "";
-                if (!string.IsNullOrEmpty(Email))
+                var email = session.GetString("Email") ?? "";
+                if (!string.IsNullOrEmpty(email))
                 {
-                    var user_details = db.tbl_user.Where(a => a.email == Email).FirstOrDefault();
-                    if (user_details != null)
+                    var user = db.tbl_user.FirstOrDefault(a => a.email == email);
+                    if (user != null)
                     {
-                        ServerToken = user_details.token;
-                        objRet.UserType = user_details.m_user_type_id;
+                        serverToken = user.token;
+                        objRet.UserType = user.m_user_type_id;
                     }
                 }
                 else
@@ -126,36 +171,33 @@ public class CommonFunction
                     objRet.Message = "Your session has been expired, kindly login again.";
                 }
             }
-            if (!string.IsNullOrEmpty(ServerToken) && !string.IsNullOrEmpty(token))
+
+            if (!string.IsNullOrEmpty(serverToken) && !string.IsNullOrEmpty(token))
             {
-                string ClientToken = AESEncrytDecry.Decrypt(token);
-                ServerToken = AESEncrytDecry.Decrypt(ServerToken);
-                string[] ctn = ClientToken.Split('#');
-                string[] stn = ServerToken.Split('#');
+                var clientToken = AESEncrytDecry.Decrypt(token);
+                var srvToken = AESEncrytDecry.Decrypt(serverToken);
+                var ctn = clientToken.Split('#');
+                var stn = srvToken.Split('#');
                 if (ctn.Length == stn.Length)
                 {
+                    objRet.Status = 1;
                     for (int i = 0; i < ctn.Length; i++)
                     {
-                        objRet.Status = 1;
                         if (ctn[i] != stn[i])
                         {
                             objRet.Message = "Token missmatch or invalid user.";
                             break;
                         }
-
                     }
                 }
             }
         }
         else
         {
-            httpContext.Session.Clear();
+            httpContext?.Session.Clear();
         }
         return objRet;
     }
-    
-    
-
     public static string GetMimeType(string filePath)
     {
         var mimeTypes = new Dictionary<string, string>
