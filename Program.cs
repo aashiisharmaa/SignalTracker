@@ -34,8 +34,6 @@ builder.Services.AddCors(options =>
     {
         policy
             .WithOrigins(
-                "http://localhost:5173",
-                "https://deluxe-lily-ad7565.netlify.app",
                 "https://singnaltracker.netlify.app"
             )
             .AllowAnyHeader()
@@ -105,8 +103,9 @@ app.UseRouting();
 
 app.UseCors("AllowReactApp");
 
-app.UseAuthentication();
 app.UseSession();
+app.UseAuthentication();
+
 app.UseAuthorization();
 
 // MVC endpoints
