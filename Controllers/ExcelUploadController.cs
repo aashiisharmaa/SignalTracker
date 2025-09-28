@@ -28,7 +28,7 @@ namespace SignalTracker.Controllers
 
             //string filePath = "C:\\Users\\mahkom\\Downloads\\buildings.geojson";
             //ProcessCSVController csv = new ProcessCSVController(db, cf);
-           
+
             //int rowInserted = 0;
             //int rowUpdated = 0;
             //List<string> errorList = new List<string>();
@@ -38,10 +38,10 @@ namespace SignalTracker.Controllers
         }
         [HttpGet]
         public IActionResult DownloadExcel(int FileType, string fileName)
-        {          
+        {
 
             var filePath = "";
-            if(FileType==0)
+            if (FileType == 0)
                 filePath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels", fileName);
             else
             {
@@ -56,49 +56,33 @@ namespace SignalTracker.Controllers
                 return File(fileBytes, contentType, fileName);
             }
             else
-                return Json(new { status=0,message="Template not found"});
+                return Json(new { status = 0, message = "Template not found" });
         }
         [HttpGet]
-        public JsonResult GetUploadedExcelFiles(int FileType)
+        public IActionResult GetUploadedExcelFiles(int FileType)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
-            try
-            {
-                cf.SessionCheck();
-                //message = cf.MatchToken(token);
-                message.Status = 1;
-                if (message.Status == 1)
-                {
-                    var GetObj = (from ob_excel in db.tbl_upload_history
-                                  join ob_user in db.tbl_user on ob_excel.uploaded_by equals ob_user.id                                 
-                                  select new
-                                  {
-                                      id = ob_excel.id,
-                                      file_type = ob_excel.file_type,
-                                      file_name = ob_excel.file_name,
-                                      uploaded_on = ob_excel.uploaded_on,
-                                      uploaded_by = ob_user.name,
-                                      uploaded_id = ob_excel.uploaded_by,
-                                      status = ob_excel.status == 1 ? "Success" : "Failed",
-                                      remarks= ob_excel.remarks,                                      
-                                  }).Where(a => a.file_type == FileType && (a.uploaded_id == cf.UserId)).OrderByDescending(a => a.id).ToList().Take(20);
+            if (!cf.SessionCheck())
+                return Unauthorized(new { Status = 0, Message = "Unauthorized" });
 
+            var data = (from ob_excel in db.tbl_upload_history
+                        join ob_user in db.tbl_user on ob_excel.uploaded_by equals ob_user.id
+                        where ob_excel.file_type == FileType && ob_excel.uploaded_by == cf.UserId
+                        orderby ob_excel.id descending
+                        select new
+                        {
+                            id = ob_excel.id,
+                            file_type = ob_excel.file_type,
+                            file_name = ob_excel.file_name,
+                            uploaded_on = ob_excel.uploaded_on,
+                            uploaded_by = ob_user.name,
+                            uploaded_id = ob_excel.uploaded_by,
+                            status = ob_excel.status == 1 ? "Success" : "Failed",
+                            remarks = ob_excel.remarks,
+                        })
+                        .Take(20)
+                        .ToList();
 
-                    //if (uploaded_by != 0)
-                    //    GetObj = GetObj.Where(a => a.ob_excel.uploaded_by == uploaded_by).ToList();                        
-
-                    message.Data = GetObj;
-
-                }
-            }
-            catch (Exception ex)
-            {
-                Writelog writelog = new Writelog(db);
-                writelog.write_exception_log(0, "AdminHomeController", "GetUploadedExcelFiles", DateTime.Now, ex);
-                message.Status = 0;
-                message.Message = DisplayMessage.ErrorMessage;
-            }
-            return Json(message);
+            return Ok(new { Status = 1, Data = data });
         }
         [HttpPost]
         [RequestSizeLimit(100_000_000)]
@@ -114,7 +98,7 @@ namespace SignalTracker.Controllers
                 string SessionIds = values["SessionIds"].ToString();
 
                 int UploadFileType = Convert.ToInt32(values["UploadFileType"]);
-                
+
                 cf.SessionCheck();
 
                 //message = cf.MatchToken(token);
@@ -145,7 +129,7 @@ namespace SignalTracker.Controllers
                             {
                                 var directorypath = Path.Combine(Directory.GetCurrentDirectory(), "UploadedExcels");
                                 string contentType = FileUpload1.ContentType;
-                               if(CommonFunction.ValidateCSVZipFile(contentType))
+                                if (CommonFunction.ValidateCSVZipFile(contentType))
                                 {
                                     DateTime Date = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, INDIAN_ZONE);
                                     if (!Directory.Exists(directorypath))
@@ -181,7 +165,7 @@ namespace SignalTracker.Controllers
                                     }
                                     string polygonFilePath = "";
 
-                                    if(FileUpload2!=null && !string.IsNullOrEmpty(inboundPolygonFile))
+                                    if (FileUpload2 != null && !string.IsNullOrEmpty(inboundPolygonFile))
                                     {
                                         polygonFilePath = Path.Combine(directorypath, inboundPolygonFile);
                                         using (var stream = new FileStream(polygonFilePath, FileMode.Create))
@@ -230,10 +214,10 @@ namespace SignalTracker.Controllers
                                             // db.tbl_upload_history.Add(excel_details);
                                             if (projectId > 0)
                                             {
-                                                var objProject = db.tbl_project.Where(a=>a.id== projectId).FirstOrDefault();
+                                                var objProject = db.tbl_project.Where(a => a.id == projectId).FirstOrDefault();
                                                 if (objProject != null)
                                                 {
-                                                   objProject.status = 0;
+                                                    objProject.status = 0;
                                                     db.Entry(objProject).State = EntityState.Modified;
                                                 }
                                             }
@@ -299,18 +283,18 @@ namespace SignalTracker.Controllers
             return Json(message);
         }
         [HttpGet]
-        public JsonResult GetSessions(DateTime fromDate,DateTime toDate)
+        public JsonResult GetSessions(DateTime fromDate, DateTime toDate)
         {
             ReturnAPIResponse message = new ReturnAPIResponse();
             try
             {
-                cf.SessionCheck();               
+                cf.SessionCheck();
                 //if (message.Status == 1)
                 {
                     message.Status = 1;
 
 
-                    var rawSessions = db.tbl_session.Where(s => s.start_time >= fromDate && s.end_time <= toDate) .Join(db.tbl_user,
+                    var rawSessions = db.tbl_session.Where(s => s.start_time >= fromDate && s.end_time <= toDate).Join(db.tbl_user,
                                        s => s.user_id,
                                        u => u.id,
                                        (s, u) => new

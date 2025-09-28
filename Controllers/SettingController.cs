@@ -5,6 +5,7 @@ using SignalTracker.Models;
 
 namespace SignalTracker.Controllers
 {
+    
     [Route("api/[controller]")]
     [ApiController]
     public class SettingController : ControllerBase
