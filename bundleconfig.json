@@ -1,41 +1,12 @@
 [
   {
     "outputFileName": "wwwroot/js/admin-bundle.js",
-    "inputFiles": [
-      "wwwroot/Admin/Controllers/IndexController.js",
-    
-      "wwwroot/Admin/Controllers/StateUsersController.js",
-      "wwwroot/Admin/Controllers/ManageUsersController.js",
-      "wwwroot/Admin/Controllers/LoginAuditReportController.js",
-      "wwwroot/Admin/Controllers/DownloadExcelController.js",
-      "wwwroot/Admin/Controllers/SessionController.js",    
-      "wwwroot/Admin/Factory/AuthHttpResponseInterceptor.js",
-      "wwwroot/Admin/Factory/QueryStringFactory.js",
-      "wwwroot/Admin/AdminApp.js"
-    ],
     "minify": {
       "enabled": true
     }
   },
   {
     "outputFileName": "wwwroot/js/vendor-bundle.js",
-    "inputFiles": [
-      "wwwroot/js/jquery.js",
-      "wwwroot/js/popper.js",
-      "wwwroot/js/bootstrap.js",
-      "wwwroot/js/perfect-scrollbar.js", 
-      "wwwroot/Admin/angular.min.js",
-      "wwwroot/Scripts/dirPagination.js",
-      "wwwroot/Scripts/angular-route.min.js",
-      "wwwroot/Scripts/lodash.min.js",
-      "wwwroot/Scripts/angularjs-dropdown-multiselect.min.js",
-      "wwwroot/Scripts/ui-bootstrap-tpls.js",
-      "wwwroot/Scripts/ng-modal.js",
-      "wwwroot/Scripts/moment-with-locales.js",
-      "wwwroot/Scripts/angular-moment-picker.js",
-      "wwwroot/Scripts/sha256.js",
-      "wwwroot/Admin/custom-alert.js"
-    ],
     "minify": {
       "enabled": true
     }
