@@ -1,20 +1,20 @@
 {
   "format": 1,
   "restore": {
-    "E:\\SignalTracker\\SignalTracker.csproj": {}
+    "/Users/deepsharma/Downloads/SignalTracker/SignalTracker.csproj": {}
   },
   "projects": {
-    "E:\\SignalTracker\\SignalTracker.csproj": {
+    "/Users/deepsharma/Downloads/SignalTracker/SignalTracker.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "E:\\SignalTracker\\SignalTracker.csproj",
+        "projectUniqueName": "/Users/deepsharma/Downloads/SignalTracker/SignalTracker.csproj",
         "projectName": "SignalTracker",
-        "projectPath": "E:\\SignalTracker\\SignalTracker.csproj",
-        "packagesPath": "C:\\Users\\adi thakur\\.nuget\\packages\\",
-        "outputPath": "E:\\SignalTracker\\obj\\",
+        "projectPath": "/Users/deepsharma/Downloads/SignalTracker/SignalTracker.csproj",
+        "packagesPath": "/Users/deepsharma/.nuget/packages/",
+        "outputPath": "/Users/deepsharma/Downloads/SignalTracker/obj/",
         "projectStyle": "PackageReference",
         "configFilePaths": [
-          "C:\\Users\\adi thakur\\AppData\\Roaming\\NuGet\\NuGet.Config"
+          "/Users/deepsharma/.nuget/NuGet/NuGet.Config"
         ],
         "originalTargetFrameworks": [
           "net6.0"
@@ -93,8 +93,7 @@
             "net47",
             "net471",
             "net472",
-            "net48",
-            "net481"
+            "net48"
           ],
           "assetTargetFallback": true,
           "warn": true,
@@ -106,7 +105,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\6.0.428\\RuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/local/share/dotnet/sdk/6.0.100/RuntimeIdentifierGraph.json"
         }
       }
     }

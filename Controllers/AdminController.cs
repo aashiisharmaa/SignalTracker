@@ -1,37 +1,39 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using SignalTracker.Helper;
 using SignalTracker.Models;
 using System;
-using System.Drawing;
-using System.Globalization;
-using System.Reflection.Emit;
-using System.Web;
-using static Microsoft.EntityFrameworkCore.DbLoggerCategory;
-//using System.Data.Entity.SqlServer;
-using Microsoft.AspNetCore.Authentication;
-using Microsoft.AspNetCore.Authentication.Cookies;
-using System.Security.Claims;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SignalTracker.Controllers
 {
     [Route("Admin/[action]")]
     public class AdminController : BaseController
     {
-        ApplicationDbContext db = null;
-        CommonFunction cf = null;
-        public AdminController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor)
+        private readonly ApplicationDbContext db;
+        private readonly CommonFunction cf;
+        private readonly IMemoryCache cache;
+
+        public AdminController(ApplicationDbContext context, IHttpContextAccessor httpContextAccessor, IMemoryCache cache)
         {
             db = context;
             cf = new CommonFunction(context, httpContextAccessor);
+            this.cache = cache;
         }
+
         public IActionResult Index()
         {
             if (!cf.SessionCheck())
                 return RedirectToAction("Index", "Home");
             return View();
         }
+
         public IActionResult Dashboard()
         {
             if (!IsAngularRequest() || !cf.SessionCheck())
@@ -41,88 +43,131 @@ namespace SignalTracker.Controllers
             ViewBag.UserType = cf.UserType;
             return View();
         }
-        [HttpGet]
-        [HttpGet]
-        public JsonResult GetReactDashboardData()
+
+        // ----- DTOs -----
+        private sealed class UserListItemDto
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            public int Id { get; set; }
+            public string? Name { get; set; }
+            public string? Email { get; set; }
+            public string? Mobile { get; set; }
+            public int? UserTypeId { get; set; }
+            public int IsActive { get; set; }
+            public DateTime? DateCreated { get; set; }
+            public string? Make { get; set; }
+            public string? Model { get; set; }
+            public string? Os { get; set; }
+            public string? OperatorName { get; set; }
+        }
+
+        private sealed class LogDto
+        {
+            public int session_id { get; set; }
+            public double? lat { get; set; }
+            public double? lon { get; set; }
+            public double? rsrp { get; set; }
+            public double? rsrq { get; set; }
+            public double? sinr { get; set; }
+            public string? ul_tpt { get; set; }
+            public  string? dl_tpt { get; set; }
+            public string? band { get; set; }
+            public string? network { get; set; }
+            public string? m_alpha_long { get; set; }
+            public DateTime? timestamp { get; set; }
+        }
+
+        private Task<int> CountDistinctUsersAsync(CancellationToken ct) =>
+            db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
+
+        // ---------- DASHBOARD ----------
+        [HttpGet]
+        public async Task<JsonResult> GetReactDashboardData(CancellationToken ct = default)
+        {
+            var message = new ReturnAPIResponse { Status = 1 };
+
             try
             {
-                // SessionCheck is important for security
-                // For development, you might temporarily comment it out if it causes issues,
-                // but ensure it's active in production.
-                // cf.SessionCheck(); 
+                // if (!cf.SessionCheck()) { message.Status = 0; message.Message = "Unauthorized"; return Json(message); }
 
-                message.Status = 1;
-
-                // --- 1. Basic Stats ---
-                int totalSessions = db.tbl_session.Count();
-                int totalOnlineSessions = db.tbl_session.Count(s => s.end_time == null);
-                int totalSamples = db.tbl_network_log.Count();
-                int totalUsers = db.tbl_session.Select(s => s.user_id).Distinct().Count();
-
-                // --- 2. Chart Data Calculations ---
-
-                // Chart 1: Monthly Samples
-                var monthlySampleCounts = db.tbl_network_log
-                    .Where(n => n.timestamp.HasValue)
-                    .GroupBy(n => new { n.timestamp.Value.Year, n.timestamp.Value.Month })
-                    .OrderBy(g => g.Key.Year).ThenBy(g => g.Key.Month)
-                    .Select(g => new { month = new DateTime(g.Key.Year, g.Key.Month, 1).ToString("yyyy-MM"), count = g.Count() })
-                    .ToList();
-
-                // Chart 2: Operator wise Samples
-                var operatorWiseSamples = db.tbl_network_log
-                    .Where(a => !string.IsNullOrEmpty(a.m_alpha_long))
-                    .GroupBy(n => n.m_alpha_long)
-                    .Select(g => new { name = g.Key, value = g.Count() })
-                    .ToList();
-
-                // Chart 3: Network Type Distribution
-                var networkTypeDistribution = db.tbl_network_log
-                    .Where(n => !string.IsNullOrEmpty(n.network))
-                    .GroupBy(n => n.network)
-                    .Select(g => new { name = g.Key, value = g.Count() })
-                    .ToList();
-
-                // Chart 4: Average RSRP Per Operator
-                var avgRsrpPerOperator = db.tbl_network_log
-                    .Where(n => !string.IsNullOrEmpty(n.m_alpha_long) && n.rsrp.HasValue)
-                    .GroupBy(n => n.m_alpha_long)
-                    .Select(g => new { name = g.Key, value = Math.Round(g.Average(item => item.rsrp.Value), 2) })
-                    .ToList();
-
-                // Chart 5: Band Distribution
-                var bandDistribution = db.tbl_network_log
-                    .Where(n => !string.IsNullOrEmpty(n.band))
-                    .GroupBy(n => n.band)
-                    .Select(g => new { name = "Band " + g.Key, value = g.Count() })
-                    .ToList();
-
-                // Chart 6: Handset wise Distribution
-                var handsetDistribution = (from user in db.tbl_user
-                                           join session in db.tbl_session on user.id equals session.user_id
-                                           where !string.IsNullOrEmpty(user.make)
-                                           group user by user.make into g
-                                           select new { name = g.Key, value = g.Count() }).ToList();
-
-
-                // --- 3. Assemble the Response ---
-                message.Data = new
+                var data = await cache.GetOrCreateAsync("dash:react:v2", async entry =>
                 {
-                    // Top-level stats
-                    totalSessions,
-                    totalOnlineSessions,
-                    totalSamples,
-                    totalUsers,
-                    // Data for each chart
-                    monthlySampleCounts,
-                    operatorWiseSamples,
-                    networkTypeDistribution,
-                    avgRsrpPerOperator,
-                    bandDistribution,
-                    handsetDistribution
-                };
+                    entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(45);
+
+                    var totalSessionsTask       = db.tbl_session.AsNoTracking().CountAsync(ct);
+                    var totalOnlineSessionsTask = db.tbl_session.AsNoTracking().CountAsync(s => s.end_time == null, ct);
+                    var totalSamplesTask        = db.tbl_network_log.AsNoTracking().CountAsync(ct);
+                    var totalUsersTask          = CountDistinctUsersAsync(ct);
+
+                    var monthlyTask = db.tbl_network_log.AsNoTracking()
+                        .Where(n => n.timestamp.HasValue)
+                        .GroupBy(n => new { n.timestamp!.Value.Year, n.timestamp!.Value.Month })
+                        .Select(g => new { g.Key.Year, g.Key.Month, Count = g.Count() })
+                        .OrderBy(x => x.Year).ThenBy(x => x.Month)
+                        .ToListAsync(ct);
+
+                    var operatorWiseTask = db.tbl_network_log.AsNoTracking()
+                        .Where(a => a.m_alpha_long != null && a.m_alpha_long != "")
+                        .GroupBy(n => n.m_alpha_long!)
+                        .Select(g => new { name = g.Key, value = g.Count() })
+                        .OrderByDescending(x => x.value)
+                        .ToListAsync(ct);
+
+                    var networkTypeTask = db.tbl_network_log.AsNoTracking()
+                        .Where(n => n.network != null && n.network != "")
+                        .GroupBy(n => n.network!)
+                        .Select(g => new { name = g.Key, value = g.Count() })
+                        .OrderByDescending(x => x.value)
+                        .ToListAsync(ct);
+
+                    var avgRsrpTask = db.tbl_network_log.AsNoTracking()
+                        .Where(n => n.m_alpha_long != null && n.m_alpha_long != "" && n.rsrp.HasValue)
+                        .GroupBy(n => n.m_alpha_long!)
+                        .Select(g => new { name = g.Key, value = Math.Round(g.Average(item => item.rsrp!.Value), 2) })
+                        .OrderByDescending(x => x.value)
+                        .ToListAsync(ct);
+
+                    var bandTask = db.tbl_network_log.AsNoTracking()
+                        .Where(n => n.band != null && n.band != "")
+                        .GroupBy(n => n.band!)
+                        .Select(g => new { Band = g.Key, Count = g.Count() })
+                        .OrderByDescending(x => x.Count)
+                        .ToListAsync(ct);
+
+                    var handsetTask =
+                        (from user in db.tbl_user.AsNoTracking()
+                         join session in db.tbl_session.AsNoTracking() on user.id equals session.user_id
+                         where !string.IsNullOrEmpty(user.make)
+                         group user by user.make! into g
+                         select new { name = g.Key, value = g.Count() })
+                        .ToListAsync(ct);
+
+                    await Task.WhenAll(totalSessionsTask, totalOnlineSessionsTask, totalSamplesTask, totalUsersTask,
+                                       monthlyTask, operatorWiseTask, networkTypeTask, avgRsrpTask, bandTask, handsetTask);
+
+                    var monthlySampleCounts = (await monthlyTask)
+                        .Select(x => new { month = $"{x.Year:D4}-{x.Month:D2}", count = x.Count })
+                        .ToList();
+
+                    var bandDistribution = (await bandTask)
+                        .Select(x => new { name = "Band " + x.Band, value = x.Count })
+                        .ToList();
+
+                    return new
+                    {
+                        totalSessions       = await totalSessionsTask,
+                        totalOnlineSessions = await totalOnlineSessionsTask,
+                        totalSamples        = await totalSamplesTask,
+                        totalUsers          = await totalUsersTask,
+                        monthlySampleCounts,
+                        operatorWiseSamples     = await operatorWiseTask,
+                        networkTypeDistribution = await networkTypeTask,
+                        avgRsrpPerOperator      = await avgRsrpTask,
+                        bandDistribution,
+                        handsetDistribution     = await handsetTask
+                    };
+                });
+
+                message.Data = data;
             }
             catch (Exception ex)
             {
@@ -132,10 +177,11 @@ namespace SignalTracker.Controllers
 
             return Json(message);
         }
+
         [HttpGet]
-        public JsonResult GetDashboardData_old()
+        public async Task<JsonResult> GetDashboardData_old(CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
 
             try
             {
@@ -144,99 +190,76 @@ namespace SignalTracker.Controllers
 
                 var today = DateTime.Today;
 
-                // Total number of sessions
-                int totalSessions = db.tbl_session.Count();
+                var totalSessionsTask = db.tbl_session.AsNoTracking().CountAsync(ct);
 
-                // Total online sessions (today's sessions with no end_time)
-                int totalOnlineSessions = db.tbl_session
-                    .Where(s => s.start_time != null && s.end_time == null && s.start_time.Value.Date == today)
-                    .Count();
+                var totalOnlineSessionsTask = db.tbl_session.AsNoTracking()
+                    .Where(s => s.start_time != null && s.end_time == null && s.start_time!.Value.Date == today)
+                    .CountAsync(ct);
 
-                // Total number of samples
-                int totalSamples = db.tbl_network_log.Count();
+                var totalSamplesTask = db.tbl_network_log.AsNoTracking().CountAsync(ct);
 
-                // Number of users
-                int totalUsers = db.tbl_session.Select(s => s.user_id).Distinct().Count();
-
-                // Number of network types
-                int totalNetworkTypes = db.tbl_network_log
-                    .Where(x => x.network != null && x.network != "")
-                    .Select(x => x.network)
+                var totalUsersTask = db.tbl_session.AsNoTracking()
+                    .Select(s => s.user_id)
                     .Distinct()
-                    .Count();
+                    .CountAsync(ct);
 
-                // Network Type Distribution (pie chart)
-                var networkTypeDistribution_horizontal_bar = db.tbl_network_log
+                var networkTypeDistributionTask = db.tbl_network_log.AsNoTracking()
                     .Where(x => x.network != null && x.network != "")
-                    .GroupBy(x => x.network)
-                    .Select(g => new
-                    {
-                        network = g.Key,
-                        count = g.Count()
-                    }).ToList();
+                    .GroupBy(x => x.network!)
+                    .Select(g => new { network = g.Key, count = g.Count() })
+                    .ToListAsync(ct);
 
-                // Samples grouped by m_alpha_long (for pie chart)
-                var samplesByAlphaLong = db.tbl_network_log
+                var samplesByAlphaLongTask = db.tbl_network_log.AsNoTracking()
                     .Where(a => a.m_alpha_long != null && a.m_alpha_long != "")
-                    .GroupBy(n => n.m_alpha_long)
-                    .Select(g => new
-                    {
-                        m_alpha_long = g.Key,
-                        count = g.Count()
-                    }).ToList();
+                    .GroupBy(n => n.m_alpha_long!)
+                    .Select(g => new { m_alpha_long = g.Key, count = g.Count() })
+                    .ToListAsync(ct);
 
-                // Samples added per month for the last 6 months (bar chart)
-                DateTime sixMonthsAgo = today.AddMonths(-5); // includes current month
-                var monthlySampleCounts = db.tbl_network_log
+                DateTime sixMonthsAgo = today.AddMonths(-5);
+                var monthlyTask = db.tbl_network_log.AsNoTracking()
                     .Where(n => n.timestamp >= sixMonthsAgo)
-                    .GroupBy(n => new { n.timestamp.Value.Year, n.timestamp.Value.Month })
+                    .GroupBy(n => new { n.timestamp!.Value.Year, n.timestamp!.Value.Month })
                     .OrderBy(g => g.Key.Year).ThenBy(g => g.Key.Month)
-                    .Select(g => new
-                    {
-                        month = new DateTime(g.Key.Year, g.Key.Month, 1).ToString("yyyy-MM"),
-                        count = g.Count()
-                    }).ToList();
+                    .Select(g => new { Year = g.Key.Year, Month = g.Key.Month, Count = g.Count() })
+                    .ToListAsync(ct);
 
-                var networkLogs = db.tbl_network_log
+                var avgRsrpSinrTask = db.tbl_network_log.AsNoTracking()
                     .Where(x => x.rsrp != null && x.sinr != null && x.m_alpha_long != null)
-                    .ToList();
-
-                var avgRsrpSinrPerOperator_bar = networkLogs
-                    .Where(x => x.rsrp != null && x.sinr != null)
-                    .GroupBy(x => x.m_alpha_long)
+                    .GroupBy(x => x.m_alpha_long!)
                     .Select(g => new
                     {
                         Operator = g.Key,
-                        AvgRSRP = Math.Round(g.Average(x => x.rsrp.Value), 2),
-                        AvgSINR = Math.Round(g.Average(x => x.sinr.Value), 2)
+                        AvgRSRP = Math.Round(g.Average(x => x.rsrp!.Value), 2),
+                        AvgSINR = Math.Round(g.Average(x => x.sinr!.Value), 2)
                     })
-                    .ToList();
+                    .ToListAsync(ct);
 
-
-
-                // Most used band for pie chart
-                var bandDistribution_pie = db.tbl_network_log
+                var bandTask = db.tbl_network_log.AsNoTracking()
                     .Where(x => !string.IsNullOrEmpty(x.band))
-                    .GroupBy(x => x.band)
-                    .Select(g => new
-                    {
-                        band = g.Key,
-                        count = g.Count()
-                    }).OrderByDescending(x => x.count)
+                    .GroupBy(x => x.band!)
+                    .Select(g => new { band = g.Key, count = g.Count() })
+                    .OrderByDescending(x => x.count)
+                    .ToListAsync(ct);
+
+                await Task.WhenAll(totalSessionsTask, totalOnlineSessionsTask, totalSamplesTask, totalUsersTask,
+                                   networkTypeDistributionTask, samplesByAlphaLongTask, monthlyTask, avgRsrpSinrTask, bandTask);
+
+                var monthlySampleCounts = (await monthlyTask)
+                    .Select(x => new { month = new DateTime(x.Year, x.Month, 1).ToString("yyyy-MM"), count = x.Count })
                     .ToList();
 
                 message.Data = new
                 {
-                    totalSessions,
-                    totalOnlineSessions,
-                    totalSamples,
-                    totalUsers,
-                    totalNetworkTypes,
-                    networkTypeDistribution_horizontal_bar, // pie
-                    samplesByAlphaLong,      // pie
-                    monthlySampleCounts,     // bar
-                    avgRsrpSinrPerOperator_bar,  // bar
-                    bandDistribution_pie             // pie
+                    totalSessions = await totalSessionsTask,
+                    totalOnlineSessions = await totalOnlineSessionsTask,
+                    totalSamples = await totalSamplesTask,
+                    totalUsers = await totalUsersTask,
+                    totalNetworkTypes = (await networkTypeDistributionTask).Count,
+                    networkTypeDistribution_horizontal_bar = await networkTypeDistributionTask,
+                    samplesByAlphaLong = await samplesByAlphaLongTask,
+                    monthlySampleCounts,
+                    avgRsrpSinrPerOperator_bar = await avgRsrpSinrTask,
+                    bandDistribution_pie = await bandTask
                 };
             }
             catch (Exception ex)
@@ -247,117 +270,68 @@ namespace SignalTracker.Controllers
 
             return Json(message);
         }
+
         [HttpGet]
-        public JsonResult GetDashboardGraphData()
+        public async Task<JsonResult> GetDashboardGraphData(CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
 
             try
             {
                 cf.SessionCheck();
                 message.Status = 1;
 
-                var today = DateTime.Today;
+                var data = await cache.GetOrCreateAsync("dash:graphs:v2", async entry =>
+                {
+                    entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(45);
 
+                    var ntTask = db.tbl_network_log.AsNoTracking()
+                        .Where(x => x.network != null && x.network != "")
+                        .GroupBy(x => x.network!)
+                        .Select(g => new { network = g.Key, count = g.Count() })
+                        .ToListAsync(ct);
 
-                // Network Type Distribution (pie chart)
-                var networkTypeDistribution_horizontal_bar = db.tbl_network_log
-                    .Where(x => x.network != null && x.network != "")
-                    .GroupBy(x => x.network)
-                    .Select(g => new
+                    var rsrpTask = db.tbl_network_log.AsNoTracking()
+                        .Where(x => x.m_alpha_long != null && x.m_alpha_long != "" && x.rsrp != null)
+                        .GroupBy(x => x.m_alpha_long!)
+                        .Select(g => new { Operator = g.Key, AvgRSRP = Math.Round(g.Average(x => x.rsrp!.Value), 2) })
+                        .OrderByDescending(x => x.AvgRSRP)
+                        .ToListAsync(ct);
+
+                    var bandTask = db.tbl_network_log.AsNoTracking()
+                        .Where(x => !string.IsNullOrEmpty(x.band))
+                        .GroupBy(x => x.band!)
+                        .Select(g => new { band = g.Key, count = g.Count() })
+                        .OrderByDescending(x => x.count)
+                        .ToListAsync(ct);
+
+                    var handsetTask =
+                        (from log in db.tbl_network_log.AsNoTracking()
+                         join s in db.tbl_session.AsNoTracking() on log.session_id equals s.id
+                         join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+                         where log.rsrp != null && !string.IsNullOrEmpty(u.make)
+                         group log by u.make! into g
+                         select new { Make = g.Key, Avg = Math.Round(g.Average(x => x.rsrp!.Value), 2), Samples = g.Count() })
+                        .OrderByDescending(x => x.Avg)
+                        .ToListAsync(ct);
+
+                    await Task.WhenAll(ntTask, rsrpTask, bandTask, handsetTask);
+
+                    return new
                     {
-                        network = g.Key,
-                        count = g.Count()
-                    }).ToList();
-
-
-                var networkLogs = db.tbl_network_log
-                    .Where(x => x.rsrp != null && x.sinr != null && x.m_alpha_long != null);
-
-
-
-                var avgRsrpSinrPerOperator_bar = networkLogs
-                    .Where(x => x.rsrp != null && x.sinr != null)
-                    .GroupBy(x => x.m_alpha_long)
-                    .Select(g => new
-                    {
-                        Operator = g.Key,
-                        AvgRSRP = Math.Round(g.Average(x => x.rsrp.Value), 2)
-
-                    }).OrderByDescending(x => x.AvgRSRP)
-                    .ToList();
-
-                // Most used band for pie chart
-                var bandDistribution_pie = db.tbl_network_log
-                    .Where(x => !string.IsNullOrEmpty(x.band))
-                    .GroupBy(x => x.band)
-                    .Select(g => new
-                    {
-                        band = g.Key,
-                        count = g.Count()
-                    }).OrderByDescending(x => x.count)
-                    .ToList();
-
-                /*IQueryable<tbl_network_log> query = db.tbl_network_log;
-                var metric = "RSRP";
-                var groupedLogs = (from user in db.tbl_user
-                                   join session in db.tbl_session on user.id equals session.user_id into userSessions
-                                   from session in userSessions.DefaultIfEmpty()
-                                   join log in query on session.id equals log.session_id into sessionLogs
-                                   from log in sessionLogs.DefaultIfEmpty()
-                                   where !string.IsNullOrEmpty(user.make)
-                                   select new
-                                   {
-                                       make = user.make.ToLower(),
-                                       log
-                                   }).ToList();  // 🚨 Query ends here; switch to in-memory processing
-
-                var handsetWiseAvg = groupedLogs
-                        .GroupBy(x => x.make)
-                        .Select(g => new
-                        {
-                            Make = g.Key,
-                            Avg = Math.Round(
-                                (decimal)(
-                                    metric == "RSRP" ? (g.Where(x => x.log != null && x.log.rsrp.HasValue).Any() ? g.Where(x => x.log != null && x.log.rsrp.HasValue).Average(x => x.log.rsrp.Value) : 0.0) :
-                                    
-                                    0.0 // Default value for when metric doesn't match
-                                ),
-                                2
-                            )
-                        }).ToList();
-                */
-
-                IQueryable<tbl_network_log> query = db.tbl_network_log;
-                var metric = "RSRP";
-
-                var handsetWiseAvg_bar = (from user in db.tbl_user
-                                          join session in db.tbl_session on user.id equals session.user_id into userSessions
-                                          from session in userSessions.DefaultIfEmpty()
-                                          join log in query on session.id equals log.session_id into sessionLogs
-                                          from log in sessionLogs.DefaultIfEmpty()
-                                          where !string.IsNullOrEmpty(user.make)
-                                          // FIX: Group by a composite key containing both original and lowercase make
-                                          group new { user, log } by new { MakeOriginal = user.make, MakeLower = user.make.ToLower() } into g
-                                          select new
-                                          {
-                                              // Select the original make value from the group's key
-                                              Make = g.Key.MakeOriginal,
-                                              Avg = (decimal)Math.Round(
-                                                  g.Any(x => x.log != null && x.log.rsrp.HasValue) ?
-                                                  g.Where(x => x.log != null && x.log.rsrp.HasValue)
-                                                   .Average(x => x.log.rsrp.Value) :
-                                                  0.0, 2)
-                                          }).ToList();
-
-
+                        networkType = await ntTask,
+                        avgRsrp = await rsrpTask,
+                        band = await bandTask,
+                        handset = await handsetTask
+                    };
+                });
 
                 message.Data = new
                 {
-                    networkTypeDistribution_horizontal_bar, // pie
-                    avgRsrpSinrPerOperator_bar,  // bar
-                    bandDistribution_pie,             // pie
-                    handsetWiseAvg_bar
+                    networkTypeDistribution_horizontal_bar = data.networkType,
+                    avgRsrpSinrPerOperator_bar = data.avgRsrp,
+                    bandDistribution_pie = data.band,
+                    handsetWiseAvg_bar = data.handset
                 };
             }
             catch (Exception ex)
@@ -368,14 +342,44 @@ namespace SignalTracker.Controllers
 
             return Json(message);
         }
+
         [HttpPost]
-        public JsonResult GetAllUsers()
+        public async Task<JsonResult> GetAllUsers(int page = 1, int pageSize = 100, CancellationToken ct = default)
         {
-            var userType = HttpContext?.Session.GetInt32("UserType") ?? 0;
-            var users = db.tbl_user.Where(a => a.isactive == 1).OrderBy(a => a.name).ToList();
-            return Json(users);
+            try
+            {
+                pageSize = Math.Clamp(pageSize, 1, 500);
+                var skip = Math.Max(0, (page - 1) * pageSize);
+
+                var users = await db.tbl_user.AsNoTracking()
+                    .Where(a => a.isactive == 1)
+                    .OrderBy(a => a.name)
+                    .Skip(skip)
+                    .Take(pageSize)
+                    .Select(u => new UserListItemDto
+                    {
+                        Id = u.id,
+                        Name = u.name,
+                        Email = u.email,
+                        Mobile = u.mobile,
+                        UserTypeId = u.m_user_type_id,
+                        IsActive = u.isactive,
+                        DateCreated = u.date_created,
+                        Make = u.make,
+                        Model = u.model,
+                        Os = u.os,
+                        OperatorName = u.operator_name
+                    })
+                    .ToListAsync(ct);
+
+                return Json(users);
+            }
+            catch (Exception ex)
+            {
+                Response.StatusCode = 500;
+                return Json(new { Message = "Error fetching users: " + ex.Message });
+            }
         }
-        [HttpGet]
 
         #region ManageUsers
         public ActionResult ManageUsers()
@@ -390,179 +394,193 @@ namespace SignalTracker.Controllers
             }
             return View();
         }
+
         [HttpGet]
-        public JsonResult GetUsers(string token, string UserName, string Email, string Mobile)
+        public async Task<JsonResult> GetUsers(
+            string token,
+            string? UserName,
+            string? Email,
+            string? Mobile,
+            int page = 1,
+            int pageSize = 50,
+            CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
             try
             {
                 cf.SessionCheck();
                 message = cf.MatchToken(token);
-                message.Status = 1;
-                if (message.Status == 1)
-                {
-                    var GetUser = (from ob_user in db.tbl_user//.Where(a => a.isactive == 1)// && (a.m_user_type_id == 2 || a.m_user_type_id == 3 || a.m_user_type_id == 4))
-                                                              //join ob_state in db.tbl_state on ob_user.tbl_state_id equals ob_state.id
-                                   select new
-                                   {
-                                       ob_user = ob_user,
-                                       //ob_state = ob_state
-                                   }
-                                 ).ToList();
+                if (message.Status != 1) return Json(message);
 
-                    //if (HttpContext?.Session.GetInt32("UserType") != 1)
-                    //{
-                    //    int? UserId = HttpContext?.Session.GetInt32("UserType");
-                    //    GetUser = GetUser.Where(a => a.ob_user.id == UserId).ToList();
-                    //}
+                var q = db.tbl_user.AsNoTracking().AsQueryable();
 
+                if (!string.IsNullOrWhiteSpace(UserName))
+                    q = q.Where(a => a.name != null && EF.Functions.Like(a.name, $"%{UserName}%"));
 
-                    if (GetUser != null)
+                if (!string.IsNullOrWhiteSpace(Email))
+                    q = q.Where(a => a.email != null && EF.Functions.Like(a.email, $"%{Email}%"));
+
+                if (!string.IsNullOrWhiteSpace(Mobile))
+                    q = q.Where(a => a.mobile != null && EF.Functions.Like(a.mobile, $"%{Mobile}%"));
+
+                pageSize = Math.Clamp(pageSize, 1, 200);
+                var skip = Math.Max(0, (page - 1) * pageSize);
+
+                var result = await q
+                    .OrderBy(a => a.name)
+                    .Skip(skip)
+                    .Take(pageSize)
+                    .Select(u => new
                     {
-
-                        if (UserName != null && UserName != "")
-                            GetUser = GetUser.Where(a => a.ob_user.name.ToLower().Contains(UserName.ToLower())).ToList();
-
-                        if (Email != null && Email != "")
-                            GetUser = GetUser.Where(a => a.ob_user.email.ToLower().Contains(Email.ToLower())).ToList();
-
-                        if (Mobile != null && Mobile != "")
-                            GetUser = GetUser.Where(a => a.ob_user.mobile.ToLower().Contains(Mobile.ToLower())).ToList();
-                    }
-                    foreach (var users in GetUser)
-                    {
-                        if (users.ob_user.password != null && users.ob_user.password != "")
+                        ob_user = new
                         {
-                            string star = "";
-                            for (int i = 0; i < 15; i++)
-                            {
-                                star += "*";
-                            }
-                            users.ob_user.password = star;
+                            id = u.id,
+                            uid = u.uid,
+                            token = u.token,
+                            name = u.name,
+                            password = !string.IsNullOrEmpty(u.password) ? new string('*', 15) : null,
+                            email = u.email,
+                            make = u.make,
+                            model = u.model,
+                            os = u.os,
+                            operator_name = u.operator_name,
+                            company_id = u.company_id,
+                            mobile = u.mobile,
+                            isactive = u.isactive,
+                            m_user_type_id = u.m_user_type_id,
+                            last_login = u.last_login,
+                            date_created = u.date_created,
+                            device_id = u.device_id,
+                            gcm_id = u.gcm_id
                         }
-                    }
-                    message.Data = GetUser;
-                }
+                    })
+                    .ToListAsync(ct);
+
+                message.Status = 1;
+                message.Data = result;
             }
             catch (Exception ex)
             {
-                Writelog writelog = new Writelog(db);
-                writelog.write_exception_log(0, "AdminHomeController", "GetUsers", DateTime.Now, ex);
+                new Writelog(db).write_exception_log(0, "AdminHomeController", "GetUsers", DateTime.Now, ex);
             }
             return Json(message);
         }
         #endregion
+
         #region Manage User
         public ActionResult ManageUser()
         {
             return View();
         }
+
         [HttpGet]
-        public JsonResult GetUserById(string token, int UserID)
+        public async Task<JsonResult> GetUserById(string token, int UserID, CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
             try
             {
                 cf.SessionCheck();
-                message.Status = 1;// = cf.MatchToken(token);
+                message.Status = 1;
                 if (message.Status == 1)
                 {
-                    var GetUser = db.tbl_user.Where(a => a.isactive == 1 && a.id == UserID).FirstOrDefault();
-
-                    if (GetUser.password != null && GetUser.password != "")
-                    {
-                        string star = "";
-                        for (int i = 0; i < 15; i++)
+                    var user = await db.tbl_user.AsNoTracking()
+                        .Where(a => a.isactive == 1 && a.id == UserID)
+                        .Select(u => new
                         {
-                            star += "*";
-                        }
-                        GetUser.password = star;
-                    }
-                    message.Data = GetUser;
+                            id = u.id,
+                            uid = u.uid,
+                            token = u.token,
+                            name = u.name,
+                            password = !string.IsNullOrEmpty(u.password) ? new string('*', 15) : null,
+                            email = u.email,
+                            make = u.make,
+                            model = u.model,
+                            os = u.os,
+                            operator_name = u.operator_name,
+                            company_id = u.company_id,
+                            mobile = u.mobile,
+                            isactive = u.isactive,
+                            m_user_type_id = u.m_user_type_id,
+                            last_login = u.last_login,
+                            date_created = u.date_created,
+                            device_id = u.device_id,
+                            gcm_id = u.gcm_id
+                        })
+                        .FirstOrDefaultAsync(ct);
+
+                    message.Data = user;
                 }
             }
             catch (Exception ex)
             {
-                Writelog writelog = new Writelog(db);
-                writelog.write_exception_log(0, "AdminHomeController", "GetUserById", DateTime.Now, ex);
+                new Writelog(db).write_exception_log(0, "AdminHomeController", "GetUserById", DateTime.Now, ex);
             }
             return Json(message);
         }
+
         public static string DecodeFrom64(string encodedData)
         {
-            System.Text.UTF8Encoding encoder = new System.Text.UTF8Encoding();
-            System.Text.Decoder utf8Decode = encoder.GetDecoder();
-            byte[] todecode_byte = Convert.FromBase64String(encodedData);
-            int charCount = utf8Decode.GetCharCount(todecode_byte, 0, todecode_byte.Length);
-            char[] decoded_char = new char[charCount];
-            utf8Decode.GetChars(todecode_byte, 0, todecode_byte.Length, decoded_char, 0);
-            string result = new String(decoded_char);
-            return result;
-
-
+            var enc = System.Text.Encoding.UTF8;
+            byte[] bytes = Convert.FromBase64String(encodedData);
+            return enc.GetString(bytes);
         }
+
         public static string EncodePasswordToBase64(string password)
         {
-            try
-            {
-                byte[] encData_byte = new byte[password.Length];
-                encData_byte = System.Text.Encoding.UTF8.GetBytes(password);
-                string encodedData = Convert.ToBase64String(encData_byte);
-                return encodedData;
-            }
-            catch (Exception ex)
-            {
-                throw new Exception("Error in base64Encode" + ex.Message);
-            }
+            var enc = System.Text.Encoding.UTF8;
+            return Convert.ToBase64String(enc.GetBytes(password));
         }
+
         [HttpPost]
-        public JsonResult SaveUserDetails([FromForm] IFormCollection values, tbl_user users, string token1, string ip)
+        public async Task<JsonResult> SaveUserDetails([FromForm] IFormCollection values, tbl_user users, string token1, string ip, CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
             try
             {
                 cf.SessionCheck();
-                message.Status = 1;// = cf.MatchToken(token1);
+                message.Status = 1;
+
                 if (message.Status == 1)
                 {
-                    users.name = HttpUtility.HtmlEncode(users.name);
-                    users.email = HttpUtility.HtmlEncode(users.email);
-                    users.mobile = HttpUtility.HtmlEncode(users.mobile);
+                    // Encode on write (you may prefer to encode at render-time instead)
+                    users.name = users.name != null ? WebUtility.HtmlEncode(users.name) : users.name;
+                    users.email = users.email != null ? WebUtility.HtmlEncode(users.email) : users.email;
+                    users.mobile = users.mobile != null ? WebUtility.HtmlEncode(users.mobile) : users.mobile;
 
                     if (users.id == 0)
                     {
-                        var GetUser = db.tbl_user.Where(a => a.email == users.email && a.isactive == 1).FirstOrDefault();
-                        if (GetUser == null)
+                        var exists = await db.tbl_user.AsNoTracking().AnyAsync(a => a.email == users.email && a.isactive == 1, ct);
+                        if (!exists)
                         {
                             users.date_created = DateTime.Now;
                             users.isactive = 1;
                             db.tbl_user.Add(users);
-                            db.SaveChanges();
+                            await db.SaveChangesAsync(ct);
                             message.Status = 1;
                             message.Message = DisplayMessage.UserDetailsSaved;
                         }
                         else
+                        {
                             message.Message = DisplayMessage.UserExist;
+                        }
                     }
                     else
                     {
-                        var GetUser = db.tbl_user.Where(a => a.id == users.id).FirstOrDefault();
-                        if (GetUser != null)
+                        var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == users.id, ct);
+                        if (getUser != null)
                         {
-                            GetUser.name = users.name;
-                            GetUser.email = users.email;
-                            GetUser.mobile = users.mobile;
-                            GetUser.m_user_type_id = users.m_user_type_id;
-                            // GetUser.password = users.password;
-                            db.Entry(GetUser).State = EntityState.Modified;
-                            db.SaveChanges();
+                            getUser.name = users.name;
+                            getUser.email = users.email;
+                            getUser.mobile = users.mobile;
+                            getUser.m_user_type_id = users.m_user_type_id;
+                            db.Entry(getUser).State = EntityState.Modified;
+                            await db.SaveChangesAsync(ct);
                             message.Status = 2;
                             message.Message = DisplayMessage.UserDetailsUpdated;
                         }
                     }
-                    message.token = "";// cf.CreateToken(ip);
+                    message.token = ""; // cf.CreateToken(ip);
                 }
-
             }
             catch (Exception ex)
             {
@@ -571,22 +589,43 @@ namespace SignalTracker.Controllers
             }
             return Json(message);
         }
+
         [HttpPost]
-        public JsonResult GetUser(int UserID, string token)
+        public async Task<JsonResult> GetUser(int UserID, string token, CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
             try
             {
                 cf.SessionCheck();
                 message = cf.MatchToken(token);
                 if (message.Status == 1)
                 {
-                    var GetUser = db.tbl_user.Where(a => a.id == UserID).FirstOrDefault();
-                    if (GetUser.password != null && GetUser.password != "")
-                    {
-                        GetUser.password = "";
-                    }
-                    message.Data = GetUser;
+                    var user = await db.tbl_user.AsNoTracking()
+                        .Where(a => a.id == UserID)
+                        .Select(u => new
+                        {
+                            id = u.id,
+                            uid = u.uid,
+                            token = u.token,
+                            name = u.name,
+                            password = "",
+                            email = u.email,
+                            make = u.make,
+                            model = u.model,
+                            os = u.os,
+                            operator_name = u.operator_name,
+                            company_id = u.company_id,
+                            mobile = u.mobile,
+                            isactive = u.isactive,
+                            m_user_type_id = u.m_user_type_id,
+                            last_login = u.last_login,
+                            date_created = u.date_created,
+                            device_id = u.device_id,
+                            gcm_id = u.gcm_id
+                        })
+                        .FirstOrDefaultAsync(ct);
+
+                    message.Data = user;
                 }
             }
             catch (Exception ex)
@@ -595,22 +634,23 @@ namespace SignalTracker.Controllers
             }
             return Json(message);
         }
+
         [HttpPost]
-        public JsonResult DeleteUser(int id, string ip)
+        public async Task<JsonResult> DeleteUser(int id, string ip, CancellationToken ct = default)
         {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+            var message = new ReturnAPIResponse();
             try
             {
                 cf.SessionCheck();
-                message.Status = 1;//message = cf.MatchToken(token);
+                message.Status = 1;
                 if (message.Status == 1)
                 {
-                    var GetUser = db.tbl_user.Where(a => a.id == id).FirstOrDefault();
-                    if (GetUser != null)
+                    var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == id, ct);
+                    if (getUser != null)
                     {
-                        GetUser.isactive = 2;
-                        db.Entry(GetUser).State = EntityState.Modified;
-                        db.SaveChanges();
+                        getUser.isactive = 2;
+                        db.Entry(getUser).State = EntityState.Modified;
+                        await db.SaveChangesAsync(ct);
                         message.Status = 1;
                         message.Message = DisplayMessage.UserDeleted;
                         if (message.Status == 1)
@@ -624,34 +664,27 @@ namespace SignalTracker.Controllers
             }
             return Json(message);
         }
+
         [HttpPost]
-        public JsonResult UserResetPassword(int userid, string newpwd, string captcha)
+        public async Task<JsonResult> UserResetPassword(int userid, string newpwd, string captcha, CancellationToken ct = default)
         {
-            ReturnMessage ret = new ReturnMessage();
+            var ret = new ReturnMessage();
             try
             {
-                //if (HttpContext?.Session.GetString("CaptchaImageText") == captcha)
+                var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == userid, ct);
+                if (getUser != null)
                 {
-                    var GetUser = db.tbl_user.Where(a => a.id == userid).FirstOrDefault();
-                    if (GetUser != null)
-                    {
-                        GetUser.password = newpwd;
-                        db.Entry(GetUser).State = EntityState.Modified;
-                        db.SaveChanges();
-                        ret.Status = 1;
-                        ret.Message = "Password has been reset successfully.";
-                    }
-                    else
-                    {
-                        ret.Status = 0;
-                        ret.Message = "Invalid Request";
-                    }
+                    getUser.password = newpwd; // consider hashing
+                    db.Entry(getUser).State = EntityState.Modified;
+                    await db.SaveChangesAsync(ct);
+                    ret.Status = 1;
+                    ret.Message = "Password has been reset successfully.";
                 }
-                //else
-                //{
-                //    ret.Status = 0;
-                //    ret.Message = "Invalid CAPTCHA Code !";
-                //}
+                else
+                {
+                    ret.Status = 0;
+                    ret.Message = "Invalid Request";
+                }
             }
             catch (Exception ex)
             {
@@ -660,20 +693,23 @@ namespace SignalTracker.Controllers
             }
             return Json(ret);
         }
+
         [HttpPost]
-        public JsonResult ChangePassword(int userid, string oldpwd, string newpwd, string captcha)
+        public async Task<JsonResult> ChangePassword(int userid, string oldpwd, string newpwd, string captcha, CancellationToken ct = default)
         {
-            ReturnMessage ret = new ReturnMessage();
+            var ret = new ReturnMessage();
             try
             {
-                if (HttpContext?.Session.GetString("CaptchaImageText") == captcha)
+                var captchaText = HttpContext?.Session.GetString("CaptchaImageText");
+                if (string.Equals(captchaText, captcha, StringComparison.Ordinal))
                 {
-                    var GetUser = db.tbl_user.Where(a => a.id == userid && a.password == oldpwd).FirstOrDefault();
-                    if (GetUser != null)
+                    var getUser = await db.tbl_user.FirstOrDefaultAsync(a => a.id == userid && a.password == oldpwd, ct);
+                    if (getUser != null)
+                    
                     {
-                        GetUser.password = newpwd;
-                        db.Entry(GetUser).State = EntityState.Modified;
-                        db.SaveChanges();
+                        getUser.password = newpwd; // consider hashing
+                        db.Entry(getUser).State = EntityState.Modified;
+                        await db.SaveChangesAsync(ct);
                         ret.Status = 1;
                     }
                     else
@@ -696,6 +732,7 @@ namespace SignalTracker.Controllers
             return Json(ret);
         }
         #endregion
+
         #region Manage Sessions
         public ActionResult ManageSession()
         {
@@ -707,13 +744,21 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet]
-        public async Task<JsonResult> GetAllNetworkLogs()
+        public async Task<JsonResult> GetAllNetworkLogs(int max = 100_000, DateTime? from = null, DateTime? to = null, CancellationToken ct = default)
         {
             try
             {
-                // A single, efficient query to get all network logs that have a location.
-                var allLogs = await db.tbl_network_log
-                    .Where(log => log.lat != null && log.lon != null)
+                var q = db.tbl_network_log.AsNoTracking()
+                    .Where(log => log.lat != null && log.lon != null);
+
+                if (from.HasValue) q = q.Where(l => l.timestamp >= from);
+                if (to.HasValue)   q = q.Where(l => l.timestamp <= to);
+
+                max = Math.Clamp(max, 1_000, 200_000);
+
+                var allLogs = await q
+                    .OrderBy(l => l.timestamp)
+                    .Take(max)
                     .Select(log => new
                     {
                         log.session_id,
@@ -725,34 +770,28 @@ namespace SignalTracker.Controllers
                         log.network,
                         log.timestamp
                     })
-                    .ToListAsync();
+                    .ToListAsync(ct);
 
                 return Json(allLogs);
             }
             catch (Exception ex)
             {
-                // Return a 500 error with a message for debugging.
                 Response.StatusCode = 500;
                 return Json(new { Message = "An error occurred on the server: " + ex.Message });
             }
         }
 
-
-        // In AdminController
-
         [HttpGet]
-        public async Task<JsonResult> GetOperatorCoverageRanking(double min = -95, double max = 0)
+        public async Task<JsonResult> GetOperatorCoverageRanking(double min = -95, double max = 0, CancellationToken ct = default)
         {
             try
             {
-                // RSRP is negative; range e.g., [-95, 0]
-                var result = await db.tbl_network_log
-                    .AsNoTracking()
+                var result = await db.tbl_network_log.AsNoTracking()
                     .Where(l => l.rsrp.HasValue && l.m_alpha_long != null && l.rsrp.Value >= min && l.rsrp.Value <= max)
-                    .GroupBy(l => l.m_alpha_long)
+                    .GroupBy(l => l.m_alpha_long!)
                     .Select(g => new { name = g.Key, count = g.Count() })
                     .OrderByDescending(x => x.count)
-                    .ToListAsync();
+                    .ToListAsync(ct);
 
                 return Json(result);
             }
@@ -764,18 +803,16 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet]
-        public async Task<JsonResult> GetOperatorQualityRanking(double min = -10, double max = 0)
+        public async Task<JsonResult> GetOperatorQualityRanking(double min = -10, double max = 0, CancellationToken ct = default)
         {
             try
             {
-                // RSRQ is also typically negative; range e.g., [-10, 0]
-                var result = await db.tbl_network_log
-                    .AsNoTracking()
+                var result = await db.tbl_network_log.AsNoTracking()
                     .Where(l => l.rsrq.HasValue && l.m_alpha_long != null && l.rsrq.Value >= min && l.rsrq.Value <= max)
-                    .GroupBy(l => l.m_alpha_long)
+                    .GroupBy(l => l.m_alpha_long!)
                     .Select(g => new { name = g.Key, count = g.Count() })
                     .OrderByDescending(x => x.count)
-                    .ToListAsync();
+                    .ToListAsync(ct);
 
                 return Json(result);
             }
@@ -786,192 +823,189 @@ namespace SignalTracker.Controllers
             }
         }
 
+       [HttpGet]
+public async Task<JsonResult> GetSessions(int page = 1, int pageSize = 100, CancellationToken ct = default)
+{
+    try
+    {
+        pageSize = Math.Clamp(pageSize, 1, 500);
+        var skip = Math.Max(0, (page - 1) * pageSize);
+
+        var sessions = await (
+            from s in db.tbl_session.AsNoTracking()
+            join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+            orderby s.start_time descending
+            select new
+            {
+                id = s.id,
+                session_name = "Session " + s.id,
+                start_time = s.start_time,
+                end_time = s.end_time,
+                notes = s.notes,
+
+                // force them to be strings in the payload (rename to *_raw)
+                start_lat_raw = s.start_lat,
+                start_lon_raw = s.start_lon,
+                end_lat_raw   = s.end_lat,
+                end_lon_raw   = s.end_lon,
+                capture_frequency_raw = s.capture_frequency,
+
+                CreatedBy = u.name,
+                mobile = u.mobile,
+                make = u.make,
+                model = u.model,
+                os = u.os,
+                operator_name = u.operator_name,
+                distance_km = s.distance,
+                start_address = s.start_address,
+                end_address = s.end_address
+            })
+            .Skip(skip)
+            .Take(pageSize)
+            .ToListAsync(ct);
+
+        return Json(sessions);
+    }
+    catch (Exception ex)
+    {
+        Response.StatusCode = 500;
+        return Json(new { Message = "An error occurred on the server: " + ex.Message });
+    }
+}
 
 
-        [HttpGet]
-        public async Task<JsonResult> GetSessions()
+
+       [HttpGet]
+public async Task<JsonResult> GetSessionsByDateRange(string startDateIso, string endDateIso, int maxLogsPerSession = 10_000, CancellationToken ct = default)
+{
+    try
+    {
+        if (!DateTime.TryParse(startDateIso, out DateTime startDate) ||
+            !DateTime.TryParse(endDateIso, out DateTime endDate))
         {
-            try
-            {
-                // This query now joins the session and user tables.
-                var sessions = await (
-                    from s in db.tbl_session
-                    join u in db.tbl_user on s.user_id equals u.id
-                    orderby s.start_time descending
-                    select new
-                    {
-                        // Core Session Info
-                        id = s.id,
-                        session_name = "Session " + s.id,
-                        start_time = s.start_time,
-                        end_time = s.end_time,
-                        notes = s.notes,
-
-                        // CRITICAL: Including the start location
-                        start_lat = s.start_lat,
-                        start_lon = s.start_lon,
-                        end_lat = (double?)s.end_lat,
-                        end_lon = (double?)s.end_lon,
-                        capture_frequency = (double?)s.capture_frequency,
-
-                        // User details joined from the user table
-                        CreatedBy = u.name,
-                        mobile = u.mobile,
-                        make = u.make,
-                        model = u.model,
-                        os = u.os,
-                        operator_name = u.operator_name,
-                        distance_km = s.distance,
-                        start_address = s.start_address,
-                        end_address = s.end_address
-
-                    })
-                    .ToListAsync();
-
-                // The frontend expects the array of sessions directly.
-                return Json(sessions);
-            }
-            catch (Exception ex)
-            {
-                // This provides a standard error response that the frontend can handle.
-                Response.StatusCode = 500;
-                return Json(new { Message = "An error occurred on the server: " + ex.Message });
-            }
+            return Json(new { success = false, Message = "Invalid date format" });
         }
 
+        endDate = endDate.Date.AddDays(1).AddTicks(-1);
 
-        [HttpGet]
-        public async Task<JsonResult> GetSessionsByDateRange(string startDateIso, string endDateIso)
+        var sessionsData = await (
+            from s in db.tbl_session.AsNoTracking()
+            join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
+            where s.start_time.HasValue && s.start_time.Value >= startDate && s.start_time.Value <= endDate
+            orderby s.start_time descending
+            select new
+            {
+                id = s.id,
+                session_name = "Session " + s.id,
+                start_time = s.start_time,
+                end_time = s.end_time,
+                notes = s.notes,
+
+                // renamed to *_raw to avoid any type collisions
+                start_lat_raw = s.start_lat,
+                start_lon_raw = s.start_lon,
+                end_lat_raw   = s.end_lat,
+                end_lon_raw   = s.end_lon,
+                capture_frequency_raw = s.capture_frequency,
+
+                distance_km = s.distance,
+                start_address = s.start_address,
+                end_address = s.end_address,
+
+                CreatedBy = u.name,
+                mobile = u.mobile,
+                make = u.make,
+                model = u.model,
+                os = u.os,
+                operator_name = u.operator_name
+            })
+            .ToListAsync(ct);
+
+        var sessionIds = sessionsData.Select(s => s.id).ToList();
+        if (sessionIds.Count == 0) return Json(Array.Empty<object>());
+
+        maxLogsPerSession = Math.Clamp(maxLogsPerSession, 100, 200_000);
+
+        var allLogsForSessions = await db.tbl_network_log.AsNoTracking()
+            .Where(log => sessionIds.Contains(log.session_id))
+            .OrderBy(l => l.timestamp)
+            .Select(l => new LogDto
+            {
+                session_id = l.session_id,
+                lat = l.lat,
+                lon = l.lon,
+                rsrp = l.rsrp,
+                rsrq = l.rsrq,
+                sinr = l.sinr,
+                ul_tpt = l.ul_tpt,
+                dl_tpt = l.dl_tpt,
+                band = l.band,
+                network = l.network,
+                m_alpha_long = l.m_alpha_long,
+                timestamp = l.timestamp
+            })
+            .ToListAsync(ct);
+
+        var logsLookup = allLogsForSessions
+            .GroupBy(x => x.session_id)
+            .ToDictionary(g => g.Key, g => g.Take(maxLogsPerSession).ToList());
+
+        var finalResult = sessionsData.Select(s => new
         {
-            try
-            {
-                if (!DateTime.TryParse(startDateIso, out DateTime startDate) ||
-                    !DateTime.TryParse(endDateIso, out DateTime endDate))
-                {
-                    return Json(new { success = false, Message = "Invalid date format" });
-                }
+            s.id,
+            s.session_name,
+            s.start_time,
+            s.end_time,
+            s.notes,
 
-                endDate = endDate.Date.AddDays(1).AddTicks(-1);
+            // strings as-is; parse on client if needed
+            s.start_lat_raw,
+            s.start_lon_raw,
+            s.end_lat_raw,
+            s.end_lon_raw,
+            s.capture_frequency_raw,
 
-                // --- Step 1: Fetch the main session and user data that matches the date range ---
-                var sessionsData = await (
-                    from s in db.tbl_session
-                    join u in db.tbl_user on s.user_id equals u.id
-                    where s.start_time.HasValue && s.start_time.Value >= startDate && s.start_time.Value <= endDate
-                    select new
-                    {
-                        // Session info
-                        id = s.id,
-                        session_name = "Session " + s.id,
-                        start_time = s.start_time,
-                        end_time = s.end_time,
-                        notes = s.notes,
-                        start_lat = (double?)s.start_lat,
-                        start_lon = s.start_lon,
-                        end_lat = s.end_lat,
-                        end_lon = s.end_lon,
-                        capture_frequency = s.capture_frequency,
-                        distance_km = s.distance,
-                        start_address = s.start_address,
-                        end_address = s.end_address,
+            s.distance_km,
+            s.start_address,
+            s.end_address,
+            s.CreatedBy,
+            s.mobile,
+            s.make,
+            s.model,
+            s.os,
+            s.operator_name,
+            Logs = logsLookup.TryGetValue(s.id, out var ls) ? ls : new List<LogDto>()
+        }).ToList();
 
-                        // User info
-                        CreatedBy = u.name,
-                        mobile = u.mobile,
-                        make = u.make,
-                        model = u.model,
-                        os = u.os,
-                        operator_name = u.operator_name
-                    })
-                    .ToListAsync(); // Execute the first query and bring sessions into memory
+        return Json(finalResult);
+    }
+    catch (Exception ex)
+    {
+        Response.StatusCode = 500;
+        return Json(new { Message = "Error fetching sessions: " + ex.Message });
+    }
+}
 
-                // --- Step 2: Efficiently fetch all related logs in a single, separate query ---
-                var sessionIds = sessionsData.Select(s => s.id).ToList();
-
-                var allLogsForSessions = await db.tbl_network_log
-                    .Where(log => sessionIds.Contains(log.session_id))
-                    .ToListAsync();
-
-                // Group the logs by session_id in memory for fast lookups
-                var logsLookup = allLogsForSessions.ToLookup(log => log.session_id);
-
-                // --- Step 3: Combine the sessions and their logs in your application code ---
-                var finalResult = sessionsData.Select(s => new
-                {
-                    // Copy all the session and user properties
-                    s.id,
-                    s.session_name,
-                    s.start_time,
-                    s.end_time,
-                    s.notes,
-                    s.start_lat,
-                    s.start_lon,
-                    s.end_lat,
-                    s.end_lon,
-                    s.capture_frequency,
-                    s.distance_km,
-                    s.start_address,
-                    s.end_address,
-                    s.CreatedBy,
-                    s.mobile,
-                    s.make,
-                    s.model,
-                    s.os,
-                    s.operator_name,
-
-                    // Assign the looked-up logs to each session
-                    Logs = logsLookup[s.id].Select(l => new
-                    {
-                        l.lat,
-                        l.lon,
-                        l.rsrp,
-                        l.rsrq,
-                        l.sinr,
-                        l.ul_tpt,
-                        l.dl_tpt,
-                        l.band,
-                        l.network,
-                        l.m_alpha_long,
-                        l.timestamp
-                    }).ToList()
-                }).ToList();
-
-                return Json(finalResult);
-            }
-            catch (Exception ex)
-            {
-                Response.StatusCode = 500;
-                return Json(new { Message = "Error fetching sessions: " + ex.Message });
-            }
-        }
 
         [HttpDelete("DeleteSession")]
-        public async Task<IActionResult> DeleteSession([FromQuery] string id)
+        public async Task<IActionResult> DeleteSession([FromQuery] string id, CancellationToken ct = default)
         {
             try
             {
-                Console.WriteLine("Hello, World!");
                 if (!int.TryParse(id, out int sessionId))
                     return BadRequest("Invalid session id");
-                // int sed = Convert.ToInt32(id);
-                var session = await db.tbl_session.FindAsync(sessionId);
 
+                var session = await db.tbl_session.FindAsync(new object?[] { sessionId }, ct);
                 if (session == null)
                 {
                     return NotFound(new { success = false, message = "Session not found." });
                 }
 
-                var logs = await db.tbl_network_log
-                    .Where(l => l.session_id == sessionId)
-                    .ToListAsync();
-
-                if (logs.Any())
-                {
-                    db.tbl_network_log.RemoveRange(logs);
-                }
-
+                // EF Core < 7 path (no ExecuteDeleteAsync)
+                var logs = await db.tbl_network_log.Where(l => l.session_id == sessionId).ToListAsync(ct);
+                if (logs.Count > 0) db.tbl_network_log.RemoveRange(logs);
                 db.tbl_session.Remove(session);
-                await db.SaveChangesAsync();
+                await db.SaveChangesAsync(ct);
 
                 return Ok(new { success = true, message = "Session deleted successfully." });
             }
@@ -984,12 +1018,6 @@ namespace SignalTracker.Controllers
                 });
             }
         }
-
-
         #endregion
-
-
-
-
     }
 }

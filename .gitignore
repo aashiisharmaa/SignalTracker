@@ -1,0 +1,17 @@
+bin/
+obj/
+*.user
+*.suo
+*.cache
+*.log
+*.pdb
+*.mdb
+*.opendb
+*.DS_Store
+.vscode/
+.idea/
+*.userprefs
+*.local.json
+*.Publish.xml
+**/Properties/launchSettings.json
+appsettings.*.json
