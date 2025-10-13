@@ -425,7 +425,7 @@ namespace SignalTracker.Controllers
 
                 pageSize = Math.Clamp(pageSize, 1, 200);
                 var skip = Math.Max(0, (page - 1) * pageSize);
-
+//havda
                 var result = await q
                     .OrderBy(a => a.name)
                     .Skip(skip)
