@@ -97,6 +97,9 @@ namespace SignalTracker.Controllers
 
             try
             {
+                var startOfDay = DateTime.Today; // or DateTime.UtcNow.Date
+var endOfDay = startOfDay.AddDays(1);
+
                 // if (!cf.SessionCheck()) { message.Status = 0; message.Message = "Unauthorized"; return Json(message); }
 
                 // ---- Super fast lite mode (stats only) ----
@@ -105,12 +108,17 @@ namespace SignalTracker.Controllers
                     const string liteKey = "dash:stats:lite";
                     if (!cache.TryGetValue(liteKey, out object? liteData))
                     {
-                        var totalSessions       = await db.tbl_session.AsNoTracking().CountAsync(ct);
-                        int totalOnlineSessions =  await db.tbl_session
-                    .Where(s => s.start_time != null && s.end_time == null && s.start_time.Value.Date == today)
-                    .Count();
-                        var totalSamples        = await db.tbl_network_log.AsNoTracking().CountAsync(ct);
-                        var totalUsers          = await db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
+                        var totalSessions = await db.tbl_session.AsNoTracking().CountAsync(ct);
+                        int totalOnlineSessions = await db.tbl_session
+.AsNoTracking()
+.CountAsync(s =>
+s.end_time == null &&
+s.start_time.HasValue &&
+s.start_time.Value >= startOfDay &&
+s.start_time.Value < endOfDay
+);
+                        var totalSamples = await db.tbl_network_log.AsNoTracking().CountAsync(ct);
+                        var totalUsers = await db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
 
                         liteData = new
                         {
