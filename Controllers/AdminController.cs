@@ -420,9 +420,9 @@ namespace SignalTracker.Controllers
             var message = new ReturnAPIResponse();
             try
             {
-                cf.SessionCheck();
-                message = cf.MatchToken(token);
-                if (message.Status != 1) return Json(message);
+                // cf.SessionCheck();
+                // message = cf.MatchToken(token);
+                // if (message.Status != 1) return Json(message);
 
                 var q = db.tbl_user.AsNoTracking().AsQueryable();
 
@@ -1006,4 +1006,4 @@ namespace SignalTracker.Controllers
             }
         }
     }
-}
+} 
