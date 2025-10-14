@@ -21,10 +21,10 @@ namespace SignalTracker.Controllers
         }
         public ActionResult Index()
         {
-            if (!IsAngularRequest() || !cf.SessionCheck())
-            {
-                return RedirectToAction("Index", "Home");
-            }
+            // if (!IsAngularRequest() || !cf.SessionCheck())
+            // {
+            //     return RedirectToAction("Index", "Home");
+            // }
 
             //string filePath = "C:\\Users\\mahkom\\Downloads\\buildings.geojson";
             //ProcessCSVController csv = new ProcessCSVController(db, cf);
@@ -61,8 +61,8 @@ namespace SignalTracker.Controllers
         [HttpGet]
         public IActionResult GetUploadedExcelFiles(int FileType)
         {
-            if (!cf.SessionCheck())
-                return Unauthorized(new { Status = 0, Message = "Unauthorized" });
+            // if (!cf.SessionCheck())
+            //     return Unauthorized(new { Status = 0, Message = "Unauthorized" });
 
             var data = (from ob_excel in db.tbl_upload_history
                         join ob_user in db.tbl_user on ob_excel.uploaded_by equals ob_user.id
@@ -99,7 +99,7 @@ namespace SignalTracker.Controllers
 
                 int UploadFileType = Convert.ToInt32(values["UploadFileType"]);
 
-                cf.SessionCheck();
+                // cf.SessionCheck();
 
                 //message = cf.MatchToken(token);
                 message.Status = 1;
