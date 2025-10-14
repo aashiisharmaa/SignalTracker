@@ -61,8 +61,8 @@ namespace SignalTracker.Controllers
         [HttpGet]
         public IActionResult GetUploadedExcelFiles(int FileType)
         {
-            if (!cf.SessionCheck())
-                return Unauthorized(new { Status = 0, Message = "Unauthorized" });
+            // if (!cf.SessionCheck())
+            //     return Unauthorized(new { Status = 0, Message = "Unauthorized" });
 
             var data = (from ob_excel in db.tbl_upload_history
                         join ob_user in db.tbl_user on ob_excel.uploaded_by equals ob_user.id
