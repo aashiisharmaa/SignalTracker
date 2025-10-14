@@ -59,31 +59,51 @@ namespace SignalTracker.Controllers
                 return Json(new { status = 0, message = "Template not found" });
         }
         [HttpGet]
-        public IActionResult GetUploadedExcelFiles(int FileType)
-        {
-            // if (!cf.SessionCheck())
-            //     return Unauthorized(new { Status = 0, Message = "Unauthorized" });
+public async Task<IActionResult> GetUploadedExcelFiles(int fileType, CancellationToken ct = default)
+{
+    // If you want to enforce auth, uncomment:
+    // if (!cf.SessionCheck())
+    //     return Unauthorized(new { Status = 0, Message = "Unauthorized" });
 
-            var data = (from ob_excel in db.tbl_upload_history
-                        join ob_user in db.tbl_user on ob_excel.uploaded_by equals ob_user.id
-                        where ob_excel.file_type == FileType && ob_excel.uploaded_by == cf.UserId
-                        orderby ob_excel.id descending
-                        select new
-                        {
-                            id = ob_excel.id,
-                            file_type = ob_excel.file_type,
-                            file_name = ob_excel.file_name,
-                            uploaded_on = ob_excel.uploaded_on,
-                            uploaded_by = ob_user.name,
-                            uploaded_id = ob_excel.uploaded_by,
-                            status = ob_excel.status == 1 ? "Success" : "Failed",
-                            remarks = ob_excel.remarks,
-                        })
-                        .Take(20)
-                        .ToList();
+    try
+    {
+        var currentUserId = cf.UserId;        // from your CommonFunction
+        bool filterByUser = currentUserId > 0; // avoid filtering to 0/null
 
-            return Ok(new { Status = 1, Data = data });
-        }
+        // LEFT JOIN to user table so it doesn't fail if user row is missing
+        var query = from h in db.tbl_upload_history.AsNoTracking()
+                    join u in db.tbl_user.AsNoTracking() on h.uploaded_by equals u.id into gu
+                    from u in gu.DefaultIfEmpty()
+                    where h.file_type == fileType
+                    select new
+                    {
+                        id = h.id,
+                        file_type = h.file_type,
+                        file_name = h.file_name,
+                        uploaded_on = h.uploaded_on,
+                        uploaded_by = u != null ? u.name : null,
+                        uploaded_id = h.uploaded_by,
+                        status = h.status == 1 ? "Success" : "Failed",
+                        remarks = h.remarks
+                    };
+
+        if (filterByUser)
+            query = query.Where(x => x.uploaded_id == currentUserId);
+
+        var data = await query
+            .OrderByDescending(x => x.id)
+            .Take(20)
+            .ToListAsync(ct);
+
+        return Ok(new { Status = 1, Data = data });
+    }
+    catch (System.Exception ex)
+    {
+        // log if needed
+        // new Writelog(db).write_exception_log(0, "AdminController", "GetUploadedExcelFiles", DateTime.Now, ex);
+        return StatusCode(500, new { Status = 0, Message = "Server error: " + ex.Message });
+    }
+}
         [HttpPost]
         [RequestSizeLimit(100_000_000)]
         public JsonResult UploadExcelFile([FromForm] IFormCollection values)
