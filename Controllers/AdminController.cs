@@ -822,13 +822,10 @@ namespace SignalTracker.Controllers
         }
 
         [HttpGet]
-        public async Task<JsonResult> GetSessions(int page = 1, int pageSize = 100, CancellationToken ct = default)
+        public async Task<JsonResult> GetSessions()
         {
             try
             {
-                pageSize = Math.Clamp(pageSize, 1, 500);
-                var skip = Math.Max(0, (page - 1) * pageSize);
-
                 var sessions = await (
                     from s in db.tbl_session.AsNoTracking()
                     join u in db.tbl_user.AsNoTracking() on s.user_id equals u.id
@@ -841,12 +838,11 @@ namespace SignalTracker.Controllers
                         end_time = s.end_time,
                         notes = s.notes,
 
-                        // keep original types from your entity (no casting)
-                        start_lat_raw = s.start_lat,
-                        start_lon_raw = s.start_lon,
-                        end_lat_raw   = s.end_lat,
-                        end_lon_raw   = s.end_lon,
-                        capture_frequency_raw = s.capture_frequency,
+                        start_lat = s.start_lat,
+                        start_lon = s.start_lon,
+                        end_lat = (double?)s.end_lat,
+                        end_lon = (double?)s.end_lon,
+                        capture_frequency = (double?)s.capture_frequency,
 
                         CreatedBy = u.name,
                         mobile = u.mobile,
@@ -858,9 +854,7 @@ namespace SignalTracker.Controllers
                         start_address = s.start_address,
                         end_address = s.end_address
                     })
-                    .Skip(skip)
-                    .Take(pageSize)
-                    .ToListAsync(ct);
+                    .ToListAsync();
 
                 return Json(sessions);
             }
