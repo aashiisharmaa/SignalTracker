@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using Humanizer;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
@@ -97,28 +98,19 @@ namespace SignalTracker.Controllers
 
             try
             {
-                var startOfDay = DateTime.Today; // or DateTime.UtcNow.Date
-var endOfDay = startOfDay.AddDays(1);
-
                 // if (!cf.SessionCheck()) { message.Status = 0; message.Message = "Unauthorized"; return Json(message); }
 
                 // ---- Super fast lite mode (stats only) ----
                 if (lite)
                 {
                     const string liteKey = "dash:stats:lite";
+                    var today = DateTime.Today;
                     if (!cache.TryGetValue(liteKey, out object? liteData))
                     {
-                        var totalSessions = await db.tbl_session.AsNoTracking().CountAsync(ct);
-                        int totalOnlineSessions = await db.tbl_session
-.AsNoTracking()
-.CountAsync(s =>
-s.end_time == null &&
-s.start_time.HasValue &&
-s.start_time.Value >= startOfDay &&
-s.start_time.Value < endOfDay
-);
-                        var totalSamples = await db.tbl_network_log.AsNoTracking().CountAsync(ct);
-                        var totalUsers = await db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
+                        var totalSessions       = await db.tbl_session.AsNoTracking().CountAsync(ct);
+                        var totalOnlineSessions = await db.tbl_session.AsNoTracking().CountAsync(s =>s.start_time != null && s.end_time == null && s.start_time.Value.Date == today, ct);
+                        var totalSamples        = await db.tbl_network_log.AsNoTracking().CountAsync(ct);
+                        var totalUsers          = await db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
 
                         liteData = new
                         {
@@ -143,9 +135,9 @@ s.start_time.Value < endOfDay
                         await using var ctx = await dbFactory.CreateDbContextAsync(ct);
                         return await work(ctx);
                     }
-
+                    var today = DateTime.Today;
                     var tTotalSessions       = Run(c => c.tbl_session.AsNoTracking().CountAsync(ct));
-                    var tTotalOnlineSessions = Run(c => c.tbl_session.AsNoTracking().CountAsync(s => s.end_time == null, ct));
+                    var tTotalOnlineSessions = Run(c => c.tbl_session.AsNoTracking().CountAsync(s=>s.start_time != null && s.end_time == null && s.start_time.Value.Date == today));
                     var tTotalSamples        = Run(c => c.tbl_network_log.AsNoTracking().CountAsync(ct));
                     var tTotalUsers          = Run(c => c.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct));
 
