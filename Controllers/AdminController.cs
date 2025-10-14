@@ -106,7 +106,9 @@ namespace SignalTracker.Controllers
                     if (!cache.TryGetValue(liteKey, out object? liteData))
                     {
                         var totalSessions       = await db.tbl_session.AsNoTracking().CountAsync(ct);
-                        var totalOnlineSessions = await db.tbl_session.AsNoTracking().CountAsync(s => s.end_time == null, ct);
+                        int totalOnlineSessions =  await db.tbl_session
+                    .Where(s => s.start_time != null && s.end_time == null && s.start_time.Value.Date == today)
+                    .Count();
                         var totalSamples        = await db.tbl_network_log.AsNoTracking().CountAsync(ct);
                         var totalUsers          = await db.tbl_session.AsNoTracking().Select(s => s.user_id).Distinct().CountAsync(ct);
 
