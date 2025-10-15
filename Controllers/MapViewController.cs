@@ -848,6 +848,7 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
                     .Take(20000)
                     .Select(log => new
                     {
+                        id = log.id,
                         log.session_id,
                         log.lat,
                         log.lon,
