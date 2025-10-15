@@ -12,6 +12,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Newtonsoft.Json;
+using Microsoft.EntityFrameworkCore.Storage;   // for GetDbTransaction()
+using System.Data.Common;   
+                   // for DbTransaction
+
 
 namespace SignalTracker.Controllers
 {
@@ -214,150 +218,194 @@ namespace SignalTracker.Controllers
 
         // ==================== NEW: Save polygon + attach logs ====================
 
-        public class SavePolygonRequest
-        {
-            public int ProjectId { get; set; }
-            public string Name { get; set; } = default!;
+       // ==================== NEW: Save polygon + attach logs ====================
 
-            // any one of these for polygon shape
-            public string? Wkt { get; set; }
-            public string? GeoJson { get; set; }
-            // [[lon,lat], ...]
-            public List<List<double>>? Coordinates { get; set; }
+public class SavePolygonRequest
+{
+    public int? ProjectId { get; set; }                // optional (not stored in tbl_savepolygon)
+    public string Name { get; set; } = default!;
 
-            // optional: if provided, only these log IDs get attached; otherwise spatial attach
-            public List<int>? LogIds { get; set; }
-        }
+    // any one of these for polygon shape
+    public string? Wkt { get; set; }
+    public string? GeoJson { get; set; }
 
-        // Minimal GeoJSON POCOs (Polygon only)
-        public class GeoJson
-        {
-            [JsonProperty("type")] public string Type { get; set; }
-            [JsonProperty("features")] public List<Feature> Features { get; set; }
-        }
-        public class Feature
-        {
-            [JsonProperty("type")] public string Type { get; set; }
-            [JsonProperty("geometry")] public Geometry Geometry { get; set; }
-            [JsonProperty("properties")] public Dictionary<string, object> Properties { get; set; }
-        }
-        public class Geometry
-        {
-            [JsonProperty("type")] public string Type { get; set; }
-            // [ring][vertex][lon/lat]
-            [JsonProperty("coordinates")] public List<List<List<double>>> Coordinates { get; set; }
-        }
+    // [[lon,lat], ...]
+    public List<List<double>>? Coordinates { get; set; }
 
-        [HttpPost]
-        [Route("SavePolygon")]
-        [Consumes("application/json")]
-        public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
-        {
-            if (dto == null || dto.ProjectId <= 0 || string.IsNullOrWhiteSpace(dto.Name))
-                return BadRequest(new { Status = 0, Message = "Invalid payload" });
+    // REQUIRED: insert one row per LogId in tbl_savepolygon
+    public List<int> LogIds { get; set; } = new List<int>();
+}
 
-            try
+// Minimal GeoJSON POCOs
+public class GeoJson
+{
+    [JsonProperty("type")] public string Type { get; set; }
+    [JsonProperty("features")] public List<Feature> Features { get; set; }
+}
+public class Feature
+{
+    [JsonProperty("type")] public string Type { get; set; }
+    [JsonProperty("geometry")] public Geometry Geometry { get; set; }
+    [JsonProperty("properties")] public Dictionary<string, object> Properties { get; set; }
+}
+public class Geometry
+{
+    [JsonProperty("type")] public string Type { get; set; }
+    // [ring][vertex][lon/lat]
+    [JsonProperty("coordinates")] public List<List<List<double>>> Coordinates { get; set; }
+}
+
+[HttpPost]
+[Route("SavePolygon")]
+[Consumes("application/json")]
+public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
+{
+    if (dto == null || string.IsNullOrWhiteSpace(dto.Name))
+        return BadRequest(new { Status = 0, Message = "Invalid payload: Name is required." });
+
+    if (dto.LogIds == null || dto.LogIds.Count == 0)
+        return BadRequest(new { Status = 0, Message = "LogIds is required and must contain at least one id." });
+
+    try
+    {
+        // ---- Build WKT from any of the inputs ----
+        string? wkt = dto.Wkt;
+
+        // (A) Coordinates -> WKT (lon, lat)
+        if (string.IsNullOrWhiteSpace(wkt) && dto.Coordinates != null && dto.Coordinates.Count >= 3)
+        {
+            var ring = new List<string>();
+            foreach (var c in dto.Coordinates)
             {
-                // ---- Build WKT from any of the inputs ----
-                string? wkt = dto.Wkt;
-
-                // (A) Coordinates -> WKT
-                if (string.IsNullOrWhiteSpace(wkt) && dto.Coordinates != null && dto.Coordinates.Count >= 3)
-                {
-                    var ring = new List<string>();
-                    foreach (var c in dto.Coordinates)
-                    {
-                        if (c.Count < 2) continue;
-                        ring.Add($"{c[0]} {c[1]}"); // lon lat
-                    }
-                    if (ring.Count < 3)
-                        return BadRequest(new { Status = 0, Message = "At least three coordinates required" });
-                    if (ring[0] != ring[^1]) ring.Add(ring[0]); // close ring
-                    wkt = $"POLYGON(({string.Join(", ", ring)}))";
-                }
-
-                // (B) GeoJSON -> WKT
-                if (string.IsNullOrWhiteSpace(wkt) && !string.IsNullOrWhiteSpace(dto.GeoJson))
-                {
-                    var gj = JsonConvert.DeserializeObject<GeoJson>(dto.GeoJson);
-                    var poly = gj?.Features?.FirstOrDefault(f =>
-                        f?.Geometry?.Type?.Equals("Polygon", StringComparison.OrdinalIgnoreCase) == true);
-
-                    if (poly == null) return BadRequest(new { Status = 0, Message = "No polygon in GeoJSON" });
-
-                    var ring = poly.Geometry.Coordinates?.FirstOrDefault();
-                    if (ring == null || ring.Count < 3)
-                        return BadRequest(new { Status = 0, Message = "Invalid polygon coordinates" });
-
-                    var first = ring[0]; var last = ring[^1];
-                    if (first[0] != last[0] || first[1] != last[1]) ring.Add(first);
-
-                    var coordsText = string.Join(", ", ring.Select(c => $"{c[0]} {c[1]}")); // lon lat
-                    wkt = $"POLYGON(({coordsText}))";
-                }
-
-                if (string.IsNullOrWhiteSpace(wkt))
-                    return BadRequest(new { Status = 0, Message = "Provide polygon as Coordinates / Wkt / GeoJson" });
-
-                // ---- Insert polygon ----
-                var insertSql = @"INSERT INTO map_regions (tbl_project_id, name, region, status)
-                                  VALUES ({0}, {1}, ST_GeomFromText({2}, 4326), 1)";
-                db.Database.ExecuteSqlRaw(insertSql, dto.ProjectId, dto.Name, wkt);
-
-                // ---- Get the newly created polygon id using model DTO (no nested/shadowed type) ----
-                var justInserted = db.Set<SignalTracker.Models.PolygonDto>()
-                    .FromSqlRaw(@"
-                        SELECT id, name, ST_AsText(region) AS wkt
-                        FROM map_regions
-                        WHERE tbl_project_id = {0} AND name = {1}
-                        ORDER BY id DESC
-                        LIMIT 1", dto.ProjectId, dto.Name)
-                    .FirstOrDefault();
-
-                if (justInserted == null || justInserted.id <= 0)
-                    return StatusCode(500, new { Status = 0, Message = "Polygon saved but id not retrieved." });
-
-                int polygonId = justInserted.id;
-
-                // ---- Attach logs ----
-                long assignedNow = 0;
-                if (dto.LogIds != null && dto.LogIds.Count > 0)
-                {
-                    string idList = string.Join(",", dto.LogIds.Distinct());
-                    var updateSql = $@"UPDATE tbl_network_log SET polygon_id = {{0}} WHERE id IN ({idList})";
-                    assignedNow = db.Database.ExecuteSqlRaw(updateSql, polygonId);
-                }
-                else
-                {
-                    // auto-spatial: tag all logs inside this polygon
-                    var updateSql = @"
-                        UPDATE tbl_network_log t
-                        SET t.polygon_id = {0}
-                        WHERE t.lat IS NOT NULL AND t.lon IS NOT NULL
-                          AND ST_Contains(
-                                (SELECT region FROM map_regions WHERE id = {0}),
-                                ST_PointFromText(CONCAT('POINT(', t.lon, ' ', t.lat, ')'), 4326)
-                          )";
-                    assignedNow = db.Database.ExecuteSqlRaw(updateSql, polygonId);
-                }
-
-                // total logs now tagged to this polygon
-                long totalForThisPolygon = db.tbl_network_log.LongCount(l => l.polygon_id == polygonId);
-
-                return Ok(new
-                {
-                    Status = 1,
-                    Message = "Polygon saved and logs attached.",
-                    Polygon = new { polygonId, dto.ProjectId, dto.Name, wkt },
-                    AssignedNow = assignedNow,
-                    TotalLogsForPolygon = totalForThisPolygon
-                });
+                if (c.Count < 2) continue;
+                ring.Add($"{c[0]} {c[1]}"); // lon lat
             }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
-            }
+            if (ring.Count < 3)
+                return BadRequest(new { Status = 0, Message = "At least three coordinates required" });
+            if (ring[0] != ring[^1]) ring.Add(ring[0]); // close ring
+            wkt = $"POLYGON(({string.Join(", ", ring)}))";
         }
+
+        // (B) GeoJSON -> WKT
+        if (string.IsNullOrWhiteSpace(wkt) && !string.IsNullOrWhiteSpace(dto.GeoJson))
+        {
+            var gj = JsonConvert.DeserializeObject<GeoJson>(dto.GeoJson);
+            var poly = gj?.Features?.FirstOrDefault(f =>
+                f?.Geometry?.Type?.Equals("Polygon", StringComparison.OrdinalIgnoreCase) == true);
+
+            if (poly == null) return BadRequest(new { Status = 0, Message = "No polygon in GeoJSON" });
+
+            var ring = poly.Geometry.Coordinates?.FirstOrDefault();
+            if (ring == null || ring.Count < 3)
+                return BadRequest(new { Status = 0, Message = "Invalid polygon coordinates" });
+
+            var first = ring[0]; var last = ring[^1];
+            if (first[0] != last[0] || first[1] != last[1]) ring.Add(first);
+
+            var coordsText = string.Join(", ", ring.Select(c => $"{c[0]} {c[1]}")); // lon lat
+            wkt = $"POLYGON(({coordsText}))";
+        }
+
+        if (string.IsNullOrWhiteSpace(wkt))
+            return BadRequest(new { Status = 0, Message = "Provide polygon as Coordinates / Wkt / GeoJson" });
+
+        // ---- Prepare LogIds ----
+        var ids = dto.LogIds.Distinct().Where(i => i > 0).ToList();
+        if (ids.Count == 0)
+            return BadRequest(new { Status = 0, Message = "LogIds must contain valid positive ids." });
+
+        // ---- Detect table columns (region / wkt) WITHOUT DbSet ----
+        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var conn2 = db.Database.GetDbConnection();
+        if (conn2.State != System.Data.ConnectionState.Open)
+            conn2.Open();
+
+        using (var cmd2 = conn2.CreateCommand())
+        {
+            cmd2.CommandText = @"
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'tbl_savepolygon'";
+
+            if (db.Database.CurrentTransaction != null)
+                cmd2.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+
+            using var rdr = cmd2.ExecuteReader();
+            while (rdr.Read())
+                cols.Add(rdr.GetString(0));
+        }
+
+        bool hasRegion = cols.Contains("region");
+        bool hasWktCol = cols.Contains("wkt");
+
+        if (!hasRegion && !hasWktCol)
+            return StatusCode(500, new { Status = 0, Message = "tbl_savepolygon must have either 'region' (POLYGON) or 'wkt' (TEXT) column." });
+
+        // ---- Choose INSERT shape that matches the table ----
+        string insertSql =
+            (hasRegion && hasWktCol)
+                ? @"INSERT INTO tbl_savepolygon (name, region, wkt, logid)
+                    VALUES ({0}, ST_GeomFromText({1}, 4326), {1}, {2});"
+                : (hasRegion)
+                    ? @"INSERT INTO tbl_savepolygon (name, region, logid)
+                        VALUES ({0}, ST_GeomFromText({1}, 4326), {2});"
+                    : @"INSERT INTO tbl_savepolygon (name, wkt, logid)
+                        VALUES ({0}, {1}, {2});";
+
+        var inserted = new List<long>();
+
+        // ---- Single transaction for all inserts ----
+        using var tx = db.Database.BeginTransaction();
+
+        // open the same connection once
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            conn.Open();
+
+        foreach (var logId in ids)
+        {
+            // insert
+            db.Database.ExecuteSqlRaw(insertSql, dto.Name, wkt, logId);
+
+            // fetch LAST_INSERT_ID() on the same connection + transaction
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT LAST_INSERT_ID()";
+            if (db.Database.CurrentTransaction != null)
+                cmd.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
+
+            var obj = cmd.ExecuteScalar();
+            var newId = (obj is long l) ? l : Convert.ToInt64(obj);
+
+            if (newId <= 0)
+            {
+                tx.Rollback();
+                return StatusCode(500, new { Status = 0, Message = "Row saved but id not retrieved." });
+            }
+
+            inserted.Add(newId);
+        }
+
+        tx.Commit();
+
+        return Ok(new
+        {
+            Status = 1,
+            Message = "Polygon saved in tbl_savepolygon for each specified LogId.",
+            Name = dto.Name,
+            Wkt = wkt,
+            InsertedCount = inserted.Count,
+            InsertedIds = inserted,
+            LogIds = ids,
+            ProjectId = dto.ProjectId
+        });
+    }
+    catch (Exception ex)
+    {
+        return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
+    }
+}
+
 
         // ==================== Polygon analytics (unchanged) ====================
 
