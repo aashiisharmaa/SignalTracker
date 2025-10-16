@@ -8,6 +8,7 @@ namespace SignalTracker.Controllers
     
     [Route("api/[controller]")]
     [ApiController]
+    
     public class SettingController : ControllerBase
     {
         private readonly ApplicationDbContext db;
