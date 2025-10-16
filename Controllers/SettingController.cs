@@ -92,7 +92,7 @@ namespace SignalTracker.Controllers
                     existing.volte_call = model.volte_call;
                     existing.lte_bler_json = model.lte_bler_json;
                     existing.mos_json = model.mos_json;
-
+                    existing.coveragehole_json = model.coveragehole_json;
                     db.Entry(existing).State = Microsoft.EntityFrameworkCore.EntityState.Modified;
                 }
                 else
