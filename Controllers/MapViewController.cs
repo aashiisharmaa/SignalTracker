@@ -650,25 +650,12 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
             }
         }
 
-        [HttpGet]
-[Route("GetPredictionLog")]
-public JsonResult GetPredictionLog(
-    int? projectId,
-    string? token = null,
-    DateTime? fromDate = null,
-    DateTime? toDate = null,
-    string? providers = null,
-    string? technology = null,
-    string? metric = "RSRP",
-    bool isBestTechnology = false,
-    string? Band = null,
-    string? EARFCN = null,
-    string? State = null,
-    int pointsInsideBuilding = 0,
-    bool loadFilters = false,
-    [FromQuery] string? coverageHoleJson = null // <-- important for GET
-)
+   
 
+[HttpPost]
+[Route("GetPredictionLog")]
+[Consumes("application/json")]
+public JsonResult GetPredictionLog([FromBody] PredictionLogQuery q)
 {
     var message = new ReturnAPIResponse();
 
@@ -676,42 +663,74 @@ public JsonResult GetPredictionLog(
     {
         cf.SessionCheck();
 
-        // --- (1) If frontend sent coverage-hole JSON, persist it in thresholds ---
-        if (!string.IsNullOrWhiteSpace(coverageHoleJson))
-        {
-            // find user-specific thresholds row (or create one)
-            var th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
-            if (th == null)
-            {
-                th = new thresholds
-                {
-                    user_id = cf.UserId,
-                    is_default = 0
-                };
-                db.thresholds.Add(th);
-            }
+        // ---------- (0) Load / Save coverage-hole stuff ----------
+        string? coverageHoleRaw = null;                 // ranges json raw
+        double? coverageHoleValue = null;               // single numeric
 
-            th.coveragehole_json = coverageHoleJson; // can be null/empty or full JSON
+        // Find or create thresholds row
+        var th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
+        if (th == null)
+        {
+            th = new thresholds { user_id = cf.UserId, is_default = 0 };
+            db.thresholds.Add(th);
             db.SaveChanges();
         }
 
-        IQueryable<tbl_prediction_data> query = db.tbl_prediction_data;
+        // Save ranges JSON if sent
+        if (q.coverageHoleJson.HasValue)
+        {
+            coverageHoleRaw = q.coverageHoleJson.Value.GetRawText();
+            th.coveragehole_json = coverageHoleRaw;
+        }
 
+        // Save single value if sent
+        if (q.coverageHole.HasValue)
+        {
+            coverageHoleValue = q.coverageHole.Value;
+            th.coveragehole_value = coverageHoleValue;
+        }
+
+        // If nothing sent, load existing
+        if (!q.coverageHoleJson.HasValue)
+            coverageHoleRaw = th.coveragehole_json;
+
+        if (!q.coverageHole.HasValue)
+            coverageHoleValue = th.coveragehole_value;
+
+        // Persist if we changed anything
+        if (q.coverageHoleJson.HasValue || q.coverageHole.HasValue)
+            db.SaveChanges();
+
+        // Parse ranges JSON to typed list (optional for UI)
+        List<SettingReangeColor>? coverageHoleSetting = null;
+        if (!string.IsNullOrWhiteSpace(coverageHoleRaw))
+        {
+            try
+            {
+                coverageHoleSetting =
+                    Newtonsoft.Json.JsonConvert.DeserializeObject<List<SettingReangeColor>>(coverageHoleRaw!);
+            }
+            catch { /* ignore bad json, still return raw */ }
+        }
+
+        // ---------- (1) Base query + filters ----------
+        IQueryable<tbl_prediction_data> query = db.tbl_prediction_data;
         message.Status = 1;
 
-        if (projectId.HasValue && projectId != 0)
-            query = query.Where(e => e.tbl_project_id == projectId);
+        if (q.projectId.HasValue && q.projectId.Value != 0)
+            query = query.Where(e => e.tbl_project_id == q.projectId.Value);
 
-        if (!string.IsNullOrEmpty(Band))
-            query = query.Where(e => e.band == Band);
+        if (!string.IsNullOrEmpty(q.Band))
+            query = query.Where(e => e.band == q.Band);
 
-        if (!string.IsNullOrEmpty(EARFCN))
-            query = query.Where(e => e.earfcn == EARFCN);
+        if (!string.IsNullOrEmpty(q.EARFCN))
+            query = query.Where(e => e.earfcn == q.EARFCN);
 
-        // NOTE: you can plug in fromDate/toDate/providers/technology filters here if needed.
+        if (q.fromDate.HasValue) query = query.Where(e => e.timestamp >= q.fromDate.Value);
+        if (q.toDate.HasValue)   query = query.Where(e => e.timestamp <  q.toDate.Value.AddDays(1));
 
-        // normalize metric key
-        var metricKey = (metric ?? "RSRP").ToUpperInvariant();
+        // ---------- (2) Metric selection ----------
+        var metricKey = (q.metric ?? "RSRP").Trim().ToUpperInvariant();
 
         var data = query.Select(a => new
         {
@@ -725,108 +744,105 @@ public JsonResult GetPredictionLog(
         double? averageRsrq = query.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
         double? averageSinr = query.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
 
+        // ---------- (3) Metric color thresholds ----------
         GraphStruct CoveragePerfGraph = new GraphStruct();
         var setting = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId)
                    ?? db.thresholds.FirstOrDefault(x => x.is_default == 1);
 
-        List<SettingReangeColor>? settingObj = null;
-        List<SettingReangeColor>? coverageHoleSetting = null; // <-- NEW
+        List<SettingReangeColor>? colorSetting = null;
 
         if (setting != null && data.Count > 0)
         {
             if (metricKey == "RSRP")
-                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrp_json);
+                colorSetting = Newtonsoft.Json.JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrp_json);
             else if (metricKey == "RSRQ")
-                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrq_json);
-            else if (metricKey == "SINR" || metricKey == "SNR") // tolerate SNR input
-                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.sinr_json);
+                colorSetting = Newtonsoft.Json.JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrq_json);
+            else if (metricKey == "SINR" || metricKey == "SNR")
+                colorSetting = Newtonsoft.Json.JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.sinr_json);
 
-            // --- (2) parse saved coverage-hole JSON if present ---
-            if (!string.IsNullOrWhiteSpace(setting.coveragehole_json))
-                coverageHoleSetting = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.coveragehole_json);
-
-            if (settingObj != null && settingObj.Count > 0)
+            if (colorSetting != null && colorSetting.Count > 0)
             {
-                int totalCount = data.Count;
-                GrapSeries seriesObj = new GrapSeries();
-                foreach (var s in settingObj)
+                int total = data.Count;
+                var series = new GrapSeries();
+                foreach (var s in colorSetting)
                 {
                     CoveragePerfGraph.Category.Add(s.range);
-                    int matchedCount = data.Count(a => a.prm >= s.min && a.prm <= s.max);
-                    float per = totalCount > 0 ? (matchedCount * 100f / totalCount) : 0f;
-                    seriesObj.data.Add(new { y = Math.Round(per, 2), color = s.color });
+                    int matched = data.Count(a => a.prm >= s.min && a.prm <= s.max);
+                    float per = total > 0 ? (matched * 100f / total) : 0f;
+                    series.data.Add(new { y = Math.Round(per, 2), color = s.color });
                 }
-                CoveragePerfGraph.series.Add(seriesObj);
+                CoveragePerfGraph.series.Add(series);
             }
         }
 
-        if (pointsInsideBuilding == 1 && projectId.HasValue)
+        // ---------- (4) Inside-polygons optional ----------
+        if (q.pointsInsideBuilding == 1 && q.projectId.HasValue)
         {
-            try
+            const string sqlQuery = @"
+                SELECT
+                    tpd.tbl_project_id,
+                    tpd.lat,
+                    tpd.lon,
+                    tpd.rsrp,
+                    tpd.rsrq,
+                    tpd.sinr,
+                    tpd.band,
+                    tpd.earfcn
+                FROM tbl_prediction_data AS tpd
+                JOIN map_regions AS mr ON tpd.tbl_project_id = mr.tbl_project_id
+                WHERE tpd.tbl_project_id = {0}
+                  AND ST_Contains(
+                        mr.region,
+                        ST_PointFromText(CONCAT('POINT(', tpd.lon, ' ', tpd.lat, ')'), 4326)
+                  );";
+
+            var matching = db.Set<PredictionPointDto>().FromSqlRaw(sqlQuery, q.projectId.Value).ToList();
+
+            var data1 = matching.Select(a => new
             {
-                string sqlQuery = @"
-                    SELECT
-                        tpd.tbl_project_id,
-                        tpd.lat,
-                        tpd.lon,
-                        tpd.rsrp,
-                        tpd.rsrq,
-                        tpd.sinr,
-                        tpd.band,
-                        tpd.earfcn
-                    FROM
-                        tbl_prediction_data AS tpd
-                    JOIN
-                        map_regions AS mr ON tpd.tbl_project_id = mr.tbl_project_id
-                    WHERE
-                        tpd.tbl_project_id = {0} AND
-                        ST_Contains(mr.region, ST_PointFromText(CONCAT('POINT(', tpd.lon, ' ', tpd.lat, ')'), 4326));";
+                a.lat,
+                a.lon,
+                prm = metricKey == "RSRP" ? a.rsrp :
+                      (metricKey == "RSRQ" ? a.rsrq : a.sinr)
+            }).ToList();
 
-                var matchingPoints = db.Set<PredictionPointDto>()
-                                       .FromSqlRaw(sqlQuery, projectId.Value)
-                                       .ToList();
+            double? avgRsrp1 = matching.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
+            double? avgRsrq1 = matching.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
+            double? avgSinr1 = matching.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
 
-                var data1 = matchingPoints.Select(a => new
-                {
-                    a.lat,
-                    a.lon,
-                    prm = metricKey == "RSRP" ? a.rsrp :
-                          (metricKey == "RSRQ" ? a.rsrq : a.sinr)
-                }).ToList();
-
-                double? averageRsrp1 = matchingPoints.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
-                double? averageRsrq1 = matchingPoints.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
-                double? averageSinr1 = matchingPoints.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
-
-                message.Data = new
-                {
-                    dataList = data1,
-                    avgRsrp = averageRsrp1,
-                    avgRsrq = averageRsrq1,
-                    avgSinr = averageSinr1,
-                    colorSetting = settingObj,
-                    coverageHoleSetting = coverageHoleSetting, // <-- NEW
-                    coveragePerfGraph = CoveragePerfGraph,
-                };
-
-                return Json(message);
-            }
-            catch (Exception ex)
+            message.Data = new
             {
-                Console.WriteLine($"Error fetching prediction data with raw SQL: {ex.Message}");
-                return new JsonResult(new { error = "An error occurred while fetching data.", details = ex.Message }) { StatusCode = 500 };
-            }
+                dataList = data1,
+                avgRsrp = avgRsrp1,
+                avgRsrq = avgRsrq1,
+                avgSinr = avgSinr1,
+
+                // ✅ yeh teen hamesha bhejo
+                coverageHole = coverageHoleValue,          // single numeric
+                coverageHoleSetting = coverageHoleSetting, // parsed ranges
+                coverageHoleRaw = coverageHoleRaw,         // raw json string
+
+                colorSetting = colorSetting,
+                coveragePerfGraph = CoveragePerfGraph
+            };
+            return Json(message);
         }
 
+        // ---------- (5) default response ----------
         message.Data = new
         {
             dataList = data,
             avgRsrp = averageRsrp,
             avgRsrq = averageRsrq,
             avgSinr = averageSinr,
-            colorSetting = settingObj,
-            coverageHoleSetting = coverageHoleSetting, // <-- NEW
-            coveragePerfGraph = CoveragePerfGraph,
+
+            // ✅ yeh teen hamesha bhejo
+            coverageHole = coverageHoleValue,
+            coverageHoleSetting = coverageHoleSetting,
+            coverageHoleRaw = coverageHoleRaw,
+
+            colorSetting = colorSetting,
+            coveragePerfGraph = CoveragePerfGraph
         };
     }
     catch (Exception ex)
@@ -837,7 +853,6 @@ public JsonResult GetPredictionLog(
 
     return Json(message);
 }
-
 
         [HttpGet] // existing
         public JsonResult GetPredictionDataForSelectedBuildingPolygonsRaw(int projectId, string metric)
@@ -896,11 +911,12 @@ public JsonResult GetPredictionLog(
                 {
                     a.id,
                     a.project_name,
+                    a.ref_session_id,
                     a.from_date,
                     a.to_date,
                     a.provider,
                     a.tech,
-                    a.band,
+                    a.band,   
                     a.earfcn,
                     a.apps,
                     a.created_on

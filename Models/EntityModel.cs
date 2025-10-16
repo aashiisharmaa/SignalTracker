@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Web;
 using System.Xml;
+using System.Text.Json;
 
 namespace SignalTracker.Models
 {
@@ -126,21 +127,19 @@ namespace SignalTracker.Models
         // ... include other relevant fields
     }
 
+    // required for FromSqlRaw keyless DTOs
     public class PredictionPointDto
     {
-        // Make sure these names match the column aliases in your SQL query (e.g., tpd.tbl_project_id as ProjectId)
-        // If you don't alias, they must match the original column names.
-        // For raw SQL, it's often safer to alias if C# property names differ.
-        // Example: tpd.tbl_project_id as ProjectId
-        public int tbl_project_id { get; set; } // Matches tpd.tbl_project_id
-        public float lat { get; set; }        // Matches tpd.lat
-        public float lon { get; set; }        // Matches tpd.lon
-        public float? rsrp { get; set; }
-        public float? rsrq { get; set; }
-        public float? sinr { get; set; }
+        public int tbl_project_id { get; set; }
+        public double? lat { get; set; }
+        public double? lon { get; set; }
+        public double? rsrp { get; set; }
+        public double? rsrq { get; set; }
+        public double? sinr { get; set; }
         public string? band { get; set; }
         public string? earfcn { get; set; }
     }
+
    
     //table data
     public class tbl_network_log
@@ -235,6 +234,28 @@ namespace SignalTracker.Models
         public string? image_path { get; set; }
         public string? polygon_id { get; set; }
     }
+    public class PredictionLogQuery
+    {
+        public int? projectId { get; set; }
+        public string? token { get; set; }
+        public DateTime? fromDate { get; set; }
+        public DateTime? toDate { get; set; }
+        public string? providers { get; set; }
+        public string? technology { get; set; }
+        public string? metric { get; set; } = "RSRP";
+        public bool isBestTechnology { get; set; }
+        public string? Band { get; set; }
+        public string? EARFCN { get; set; }
+        public string? State { get; set; }
+        public int pointsInsideBuilding { get; set; } = 0;
+        public bool loadFilters { get; set; } = false;
+
+         // ✅ ranges JSON (array/object)
+    public JsonElement? coverageHoleJson { get; set; }
+
+    // ✅ single numeric value (e.g. -110)
+    public double? coverageHole { get; set; }
+    }
     public class tbl_prediction_data
     {
 
@@ -255,7 +276,7 @@ namespace SignalTracker.Models
         public string? pci { get; set; }
         public string? mtilt { get; set; }
         public string? etilt { get; set; }
-
+public DateTime? timestamp { get; set; }
 
     }
     public class tbl_project
@@ -319,8 +340,12 @@ public class PolygonLogFilter
 
     public class thresholds
     {
-        public string? coveragehole_json { get; set; }   // NEW (nullable)
-                public int id { get; set; }
+        // ✅ already used for ranges JSON
+    public string? coveragehole_json { get; set; }
+
+    // ✅ NEW: single value (e.g. -110)
+    public double? coveragehole_value { get; set; }
+     public int id { get; set; }
         public int user_id { get; set; }
         public string? rsrp_json { get; set; }
         public string? rsrq_json { get; set; }
