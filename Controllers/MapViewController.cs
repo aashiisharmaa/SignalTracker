@@ -203,7 +203,7 @@ namespace SignalTracker.Controllers
 
         [HttpGet]
         [Route("GetProjectPolygons")]
-        public JsonResult GetProjectPolygons(int projectId)
+        public JsonResult GetProjectPolygons(int projectId) 
         {
             var polygons = db.Set<SignalTracker.Models.PolygonDto>()
                 .FromSqlRaw(@"
@@ -220,19 +220,26 @@ namespace SignalTracker.Controllers
 
        // ==================== NEW: Save polygon + attach logs ====================
 
+// ==================== NEW: Save polygon + attach logs ====================
+
+// ==================== NEW: Save polygon + attach logs ====================
+
+// ==================== NEW: Save polygon + attach logs ====================
+
+// ==================== NEW: Save polygon + attach logs ====================
+
 public class SavePolygonRequest
 {
-    public int? ProjectId { get; set; }                // optional (not stored in tbl_savepolygon)
+    public int? ProjectId { get; set; }
     public string Name { get; set; } = default!;
 
-    // any one of these for polygon shape
+    // any ONE of these for polygon shape
     public string? Wkt { get; set; }
     public string? GeoJson { get; set; }
-
-    // [[lon,lat], ...]
+    // [[lon,lat], ...]  (order: lon, lat)
     public List<List<double>>? Coordinates { get; set; }
 
-    // REQUIRED: insert one row per LogId in tbl_savepolygon
+    // FULL array to store
     public List<int> LogIds { get; set; } = new List<int>();
 }
 
@@ -314,76 +321,184 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
         if (ids.Count == 0)
             return BadRequest(new { Status = 0, Message = "LogIds must contain valid positive ids." });
 
-        // ---- Detect table columns (region / wkt) WITHOUT DbSet ----
-        var cols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var conn2 = db.Database.GetDbConnection();
-        if (conn2.State != System.Data.ConnectionState.Open)
-            conn2.Open();
-
-        using (var cmd2 = conn2.CreateCommand())
-        {
-            cmd2.CommandText = @"
-                SELECT COLUMN_NAME
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = 'tbl_savepolygon'";
-
-            if (db.Database.CurrentTransaction != null)
-                cmd2.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
-
-            using var rdr = cmd2.ExecuteReader();
-            while (rdr.Read())
-                cols.Add(rdr.GetString(0));
-        }
-
-        bool hasRegion = cols.Contains("region");
-        bool hasWktCol = cols.Contains("wkt");
-
-        if (!hasRegion && !hasWktCol)
-            return StatusCode(500, new { Status = 0, Message = "tbl_savepolygon must have either 'region' (POLYGON) or 'wkt' (TEXT) column." });
-
-        // ---- Choose INSERT shape that matches the table ----
-        string insertSql =
-            (hasRegion && hasWktCol)
-                ? @"INSERT INTO tbl_savepolygon (name, region, wkt, logid)
-                    VALUES ({0}, ST_GeomFromText({1}, 4326), {1}, {2});"
-                : (hasRegion)
-                    ? @"INSERT INTO tbl_savepolygon (name, region, logid)
-                        VALUES ({0}, ST_GeomFromText({1}, 4326), {2});"
-                    : @"INSERT INTO tbl_savepolygon (name, wkt, logid)
-                        VALUES ({0}, {1}, {2});";
-
-        var inserted = new List<long>();
-
-        // ---- Single transaction for all inserts ----
-        using var tx = db.Database.BeginTransaction();
-
-        // open the same connection once
+        // ---- Open connection once ----
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             conn.Open();
 
-        foreach (var logId in ids)
+        // ---- Detect columns + nullability + data types (no DbSet needed) ----
+        bool hasRegion = false, hasWktCol = false, hasLogIdCol = false, regionNullable = true;
+        string? logIdDataType = null;
+        bool hasLogIdsJsonCol = false;
+
+        using (var cmdCols = conn.CreateCommand())
         {
-            // insert
-            db.Database.ExecuteSqlRaw(insertSql, dto.Name, wkt, logId);
-
-            // fetch LAST_INSERT_ID() on the same connection + transaction
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT LAST_INSERT_ID()";
-            if (db.Database.CurrentTransaction != null)
-                cmd.Transaction = db.Database.CurrentTransaction.GetDbTransaction();
-
-            var obj = cmd.ExecuteScalar();
-            var newId = (obj is long l) ? l : Convert.ToInt64(obj);
-
-            if (newId <= 0)
+            cmdCols.CommandText = @"
+                SELECT COLUMN_NAME, IS_NULLABLE, DATA_TYPE
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'tbl_savepolygon'";
+            using var rdr = cmdCols.ExecuteReader();
+            while (rdr.Read())
             {
-                tx.Rollback();
-                return StatusCode(500, new { Status = 0, Message = "Row saved but id not retrieved." });
-            }
+                var col = rdr.GetString(0);
+                var isNull = rdr.GetString(1); // 'YES'/'NO'
+                var dtype  = rdr.GetString(2).ToLowerInvariant();
 
-            inserted.Add(newId);
+                if (col.Equals("region", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasRegion = true;
+                    regionNullable = string.Equals(isNull, "YES", StringComparison.OrdinalIgnoreCase);
+                }
+                else if (col.Equals("wkt", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasWktCol = true;
+                }
+                else if (col.Equals("logid", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasLogIdCol = true;
+                    logIdDataType = dtype; // e.g., bigint, json, text, varchar
+                }
+                else if (col.Equals("logids_json", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasLogIdsJsonCol = true;
+                }
+            }
+        }
+
+        if (!hasWktCol && !hasRegion)
+            return StatusCode(500, new { Status = 0, Message = "Table must have either 'wkt' or 'region' to store polygon geometry." });
+
+        // ---- Ensure we have a column to store the ARRAY ----
+        // Preferred: use 'logid' itself as JSON/TEXT. If it's numeric, try to ALTER it.
+        string targetArrayColumn = "logid";  // by default we will write array into logid
+        string? schemaNote = null;
+
+        bool logidIsNumeric = logIdDataType != null &&
+            new[] { "int", "bigint", "smallint", "mediumint", "tinyint", "integer", "decimal", "double", "float" }
+            .Contains(logIdDataType);
+
+        if (!hasLogIdCol)
+        {
+            // no logid at all -> try to add logids_json JSON
+            try
+            {
+                using var cmdAdd = conn.CreateCommand();
+                cmdAdd.CommandText = "ALTER TABLE tbl_savepolygon ADD COLUMN logids_json JSON NULL";
+                cmdAdd.ExecuteNonQuery();
+                hasLogIdsJsonCol = true;
+                targetArrayColumn = "logids_json";
+                schemaNote = "Added column logids_json(JSON).";
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Status = 0, Message = "No 'logid' column and couldn't add 'logids_json' JSON column.", Error = ex.Message });
+            }
+        }
+        else if (logidIsNumeric)
+        {
+            // Try to convert logid to JSON (preferred), fallback LONGTEXT; if both fail, use/add logids_json
+            bool converted = false;
+            try
+            {
+                using var cmdAlter = conn.CreateCommand();
+                cmdAlter.CommandText = "ALTER TABLE tbl_savepolygon MODIFY COLUMN logid JSON NULL";
+                cmdAlter.ExecuteNonQuery();
+                converted = true;
+                logIdDataType = "json";
+                schemaNote = "Converted logid to JSON.";
+            }
+            catch
+            {
+                try
+                {
+                    using var cmdAlter = conn.CreateCommand();
+                    cmdAlter.CommandText = "ALTER TABLE tbl_savepolygon MODIFY COLUMN logid LONGTEXT NULL";
+                    cmdAlter.ExecuteNonQuery();
+                    converted = true;
+                    logIdDataType = "longtext";
+                    schemaNote = "Converted logid to LONGTEXT.";
+                }
+                catch
+                {
+                    // last fallback: use/add logids_json
+                    if (!hasLogIdsJsonCol)
+                    {
+                        try
+                        {
+                            using var cmdAdd = conn.CreateCommand();
+                            cmdAdd.CommandText = "ALTER TABLE tbl_savepolygon ADD COLUMN logids_json JSON NULL";
+                            cmdAdd.ExecuteNonQuery();
+                            hasLogIdsJsonCol = true;
+                            targetArrayColumn = "logids_json";
+                            schemaNote = "Added column logids_json(JSON) (no permission to alter logid).";
+                        }
+                        catch (Exception ex2)
+                        {
+                            return StatusCode(500, new
+                            {
+                                Status = 0,
+                                Message = "Column 'logid' is numeric and couldn't be altered; also failed to add 'logids_json'.",
+                                Error = ex2.Message
+                            });
+                        }
+                    }
+                    else
+                    {
+                        targetArrayColumn = "logids_json";
+                        schemaNote = "Using existing logids_json(JSON) (logid is numeric).";
+                    }
+                }
+            }
+        }
+        else
+        {
+            // logid exists and is JSON/TEXT/VARCHAR already -> good
+            targetArrayColumn = "logid";
+        }
+
+        // ---- Build JSON array string for LogIds ----
+        var logIdJson = JsonConvert.SerializeObject(ids);  // "[101,102,103]"
+
+        // ---- Build INSERT dynamically (single row) ----
+        var columns = new List<string> { "name" };
+        var values  = new List<string> { "{0}" };   // dto.Name
+
+        if (hasWktCol) { columns.Add("wkt"); values.Add("{1}"); }
+
+        if (hasRegion)
+        {
+            columns.Add("region");
+            values.Add(regionNullable ? "NULL" : "ST_GeomFromText({1}, 4326)");
+        }
+
+        // ensure the target array column is included
+        columns.Add(targetArrayColumn);
+        values.Add("{2}");
+
+        string insertSql = $"INSERT INTO tbl_savepolygon ({string.Join(", ", columns)}) " +
+                           $"VALUES ({string.Join(", ", values)});";
+
+        long polygonId;
+
+        using var tx = db.Database.BeginTransaction();
+
+        // 1) Insert single row
+        db.Database.ExecuteSqlRaw(insertSql, dto.Name, wkt, logIdJson);
+
+        // 2) Get id on same connection+tx
+        using (var cmdId = conn.CreateCommand())
+        {
+            cmdId.CommandText = "SELECT LAST_INSERT_ID()";
+            cmdId.Transaction = db.Database.CurrentTransaction?.GetDbTransaction();
+            var obj = cmdId.ExecuteScalar();
+            polygonId = (obj is long l) ? l : Convert.ToInt64(obj);
+        }
+
+        if (polygonId <= 0)
+        {
+            tx.Rollback();
+            return StatusCode(500, new { Status = 0, Message = "Polygon inserted but id not retrieved." });
         }
 
         tx.Commit();
@@ -391,12 +506,12 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
         return Ok(new
         {
             Status = 1,
-            Message = "Polygon saved in tbl_savepolygon for each specified LogId.",
+            Message = $"Polygon saved; full LogIds array stored in '{targetArrayColumn}'.",
+            SchemaNote = schemaNote,
+            PolygonId = polygonId,
             Name = dto.Name,
             Wkt = wkt,
-            InsertedCount = inserted.Count,
-            InsertedIds = inserted,
-            LogIds = ids,
+            LogIdsStored = ids,
             ProjectId = dto.ProjectId
         });
     }
@@ -405,6 +520,7 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
         return StatusCode(500, new { Status = 0, Message = "Error: " + ex.Message });
     }
 }
+
 
 
         // ==================== Polygon analytics (unchanged) ====================
@@ -440,34 +556,8 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
             public int Limit { get; set; } = 20000;
         }
 
-        [HttpGet]
-        [Route("GetPolygonLogs")]
-        public async Task<JsonResult> GetPolygonLogs([FromQuery] PolygonLogFilter f)
-        {
-            if (f.PolygonId <= 0) return Json(new List<object>());
-            try
-            {
-                IQueryable<tbl_network_log> q = db.tbl_network_log.Where(l => l.polygon_id == f.PolygonId);
-                if (f.From.HasValue) q = q.Where(l => l.timestamp >= f.From.Value);
-                if (f.To.HasValue) q = q.Where(l => l.timestamp < f.To.Value.AddDays(1));
+        
 
-                var logs = await q.OrderBy(l => l.timestamp)
-                                  .Take(Math.Max(1, Math.Min(f.Limit, 20000)))
-                                  .Select(l => new
-                                  {
-                                      l.session_id, l.lat, l.lon, l.timestamp,
-                                      l.network, l.band, l.dl_tpt, l.ul_tpt, l.m_alpha_long,
-                                      l.rsrp, l.rsrq, l.sinr, l.mos, l.polygon_id
-                                  })
-                                  .ToListAsync();
-
-                return Json(logs);
-            }
-            catch (Exception ex)
-            {
-                return new JsonResult(new { message = "Server error: " + ex.Message }) { StatusCode = 500 };
-            }
-        }
 
         // ==================== Other existing endpoints (unchanged) ====================
 
@@ -561,147 +651,193 @@ public IActionResult SavePolygon([FromBody] SavePolygonRequest dto)
         }
 
         [HttpGet]
-        [Route("GetPredictionLog")]
-        public JsonResult GetPredictionLog(int? projectId, string token, DateTime? fromDate, DateTime? toDate,
-                                   string providers, string technology, string metric,
-                                   bool isBestTechnology, string Band, string EARFCN, string State, int pointsInsideBuilding = 0, bool loadFilters = false)
-        {
-            ReturnAPIResponse message = new ReturnAPIResponse();
+[Route("GetPredictionLog")]
+public JsonResult GetPredictionLog(
+    int? projectId,
+    string? token = null,
+    DateTime? fromDate = null,
+    DateTime? toDate = null,
+    string? providers = null,
+    string? technology = null,
+    string? metric = "RSRP",
+    bool isBestTechnology = false,
+    string? Band = null,
+    string? EARFCN = null,
+    string? State = null,
+    int pointsInsideBuilding = 0,
+    bool loadFilters = false,
+    [FromQuery] string? coverageHoleJson = null // <-- important for GET
+)
 
+{
+    var message = new ReturnAPIResponse();
+
+    try
+    {
+        cf.SessionCheck();
+
+        // --- (1) If frontend sent coverage-hole JSON, persist it in thresholds ---
+        if (!string.IsNullOrWhiteSpace(coverageHoleJson))
+        {
+            // find user-specific thresholds row (or create one)
+            var th = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
+            if (th == null)
+            {
+                th = new thresholds
+                {
+                    user_id = cf.UserId,
+                    is_default = 0
+                };
+                db.thresholds.Add(th);
+            }
+
+            th.coveragehole_json = coverageHoleJson; // can be null/empty or full JSON
+            db.SaveChanges();
+        }
+
+        IQueryable<tbl_prediction_data> query = db.tbl_prediction_data;
+
+        message.Status = 1;
+
+        if (projectId.HasValue && projectId != 0)
+            query = query.Where(e => e.tbl_project_id == projectId);
+
+        if (!string.IsNullOrEmpty(Band))
+            query = query.Where(e => e.band == Band);
+
+        if (!string.IsNullOrEmpty(EARFCN))
+            query = query.Where(e => e.earfcn == EARFCN);
+
+        // NOTE: you can plug in fromDate/toDate/providers/technology filters here if needed.
+
+        // normalize metric key
+        var metricKey = (metric ?? "RSRP").ToUpperInvariant();
+
+        var data = query.Select(a => new
+        {
+            a.lat,
+            a.lon,
+            prm = metricKey == "RSRP" ? a.rsrp :
+                  (metricKey == "RSRQ" ? a.rsrq : a.sinr)
+        }).ToList();
+
+        double? averageRsrp = query.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
+        double? averageRsrq = query.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
+        double? averageSinr = query.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
+
+        GraphStruct CoveragePerfGraph = new GraphStruct();
+        var setting = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId)
+                   ?? db.thresholds.FirstOrDefault(x => x.is_default == 1);
+
+        List<SettingReangeColor>? settingObj = null;
+        List<SettingReangeColor>? coverageHoleSetting = null; // <-- NEW
+
+        if (setting != null && data.Count > 0)
+        {
+            if (metricKey == "RSRP")
+                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrp_json);
+            else if (metricKey == "RSRQ")
+                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrq_json);
+            else if (metricKey == "SINR" || metricKey == "SNR") // tolerate SNR input
+                settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.sinr_json);
+
+            // --- (2) parse saved coverage-hole JSON if present ---
+            if (!string.IsNullOrWhiteSpace(setting.coveragehole_json))
+                coverageHoleSetting = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.coveragehole_json);
+
+            if (settingObj != null && settingObj.Count > 0)
+            {
+                int totalCount = data.Count;
+                GrapSeries seriesObj = new GrapSeries();
+                foreach (var s in settingObj)
+                {
+                    CoveragePerfGraph.Category.Add(s.range);
+                    int matchedCount = data.Count(a => a.prm >= s.min && a.prm <= s.max);
+                    float per = totalCount > 0 ? (matchedCount * 100f / totalCount) : 0f;
+                    seriesObj.data.Add(new { y = Math.Round(per, 2), color = s.color });
+                }
+                CoveragePerfGraph.series.Add(seriesObj);
+            }
+        }
+
+        if (pointsInsideBuilding == 1 && projectId.HasValue)
+        {
             try
             {
-                cf.SessionCheck();
+                string sqlQuery = @"
+                    SELECT
+                        tpd.tbl_project_id,
+                        tpd.lat,
+                        tpd.lon,
+                        tpd.rsrp,
+                        tpd.rsrq,
+                        tpd.sinr,
+                        tpd.band,
+                        tpd.earfcn
+                    FROM
+                        tbl_prediction_data AS tpd
+                    JOIN
+                        map_regions AS mr ON tpd.tbl_project_id = mr.tbl_project_id
+                    WHERE
+                        tpd.tbl_project_id = {0} AND
+                        ST_Contains(mr.region, ST_PointFromText(CONCAT('POINT(', tpd.lon, ' ', tpd.lat, ')'), 4326));";
 
-                IQueryable<tbl_prediction_data> query = db.tbl_prediction_data;
+                var matchingPoints = db.Set<PredictionPointDto>()
+                                       .FromSqlRaw(sqlQuery, projectId.Value)
+                                       .ToList();
 
-                message.Status = 1;
-
-                if (projectId.HasValue && projectId != 0)
-                {
-                    query = query.Where(e => e.tbl_project_id == projectId);
-                }
-
-                if (!string.IsNullOrEmpty(Band))
-                    query = query.Where(e => e.band == Band);
-
-                if (!string.IsNullOrEmpty(EARFCN))
-                    query = query.Where(e => e.earfcn == EARFCN);
-
-                var data = query.Select(a => new
+                var data1 = matchingPoints.Select(a => new
                 {
                     a.lat,
                     a.lon,
-                    prm = metric == "RSRP" ? a.rsrp : (metric == "RSRQ" ? a.rsrq : a.sinr)
+                    prm = metricKey == "RSRP" ? a.rsrp :
+                          (metricKey == "RSRQ" ? a.rsrq : a.sinr)
                 }).ToList();
 
-                double? averageRsrp = query.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
-                double? averageRsrq = query.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
-                double? averageSinr = query.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
-
-                GraphStruct CoveragePerfGraph = new GraphStruct();
-                var setting = db.thresholds.FirstOrDefault(x => x.user_id == cf.UserId);
-                if (setting == null)
-                    setting = db.thresholds.FirstOrDefault(x => x.is_default == 1);
-
-                List<SettingReangeColor>? settingObj = null;
-                if (setting != null && data.Count() > 0)
-                {
-                    if (metric == "RSRP")
-                        settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrp_json);
-                    else if (metric == "RSRQ")
-                        settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.rsrq_json);
-                    else if (metric == "SNR")
-                        settingObj = JsonConvert.DeserializeObject<List<SettingReangeColor>>(setting.sinr_json);
-
-                    if (settingObj != null && settingObj.Count > 0)
-                    {
-                        int totalCount = data.Count();
-                        GrapSeries seriesObj = new GrapSeries();
-                        foreach (var s in settingObj)
-                        {
-                            CoveragePerfGraph.Category.Add(s.range);
-                            int matchedCount = data.Count(a => a.prm >= s.min && a.prm <= s.max);
-                            float per = totalCount > 0 ? (matchedCount * 100f / totalCount) : 0f;
-                            seriesObj.data.Add(new { y = Math.Round(per, 2), color = s.color });
-                        }
-                        CoveragePerfGraph.series.Add(seriesObj);
-                    }
-                }
-
-                if (pointsInsideBuilding == 1)
-                {
-                    try
-                    {
-                        string sqlQuery = @"
-                        SELECT
-                            tpd.tbl_project_id,
-                            tpd.lat,
-                            tpd.lon,
-                            tpd.rsrp,
-                            tpd.rsrq,
-                            tpd.sinr,
-                            tpd.band,
-                            tpd.earfcn
-                        FROM
-                            tbl_prediction_data AS tpd
-                        JOIN
-                            map_regions AS mr ON tpd.tbl_project_id = mr.tbl_project_id
-                        WHERE
-                            tpd.tbl_project_id = {0} AND
-                            ST_Contains(mr.region, ST_PointFromText(CONCAT('POINT(', tpd.lon, ' ', tpd.lat, ')'), 4326));";
-
-                        var matchingPoints = db.Set<PredictionPointDto>()
-                                               .FromSqlRaw(sqlQuery, projectId)
-                                               .ToList();
-
-                        var data1 = matchingPoints.Select(a => new
-                        {
-                            a.lat,
-                            a.lon,
-                            prm = metric == "RSRP" ? a.rsrp : (metric == "RSRQ" ? a.rsrq : a.sinr)
-                        }).ToList();
-
-                        double? averageRsrp1 = matchingPoints.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
-                        double? averageRsrq1 = matchingPoints.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
-                        double? averageSinr1 = matchingPoints.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
-
-                        message.Data = new
-                        {
-                            dataList = data1,
-                            avgRsrp = averageRsrp1,
-                            avgRsrq = averageRsrq1,
-                            avgSinr = averageSinr1,
-                            colorSetting = settingObj,
-                            coveragePerfGraph = CoveragePerfGraph,
-                        };
-
-                        return Json(message);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"Error fetching prediction data with raw SQL: {ex.Message}");
-                        return Json(new { error = "An error occurred while fetching data.", details = ex.Message });
-                    }
-                }
+                double? averageRsrp1 = matchingPoints.Where(x => x.rsrp != null).Average(x => (double?)x.rsrp);
+                double? averageRsrq1 = matchingPoints.Where(x => x.rsrq != null).Average(x => (double?)x.rsrq);
+                double? averageSinr1 = matchingPoints.Where(x => x.sinr != null).Average(x => (double?)x.sinr);
 
                 message.Data = new
                 {
-                    dataList = data,
-                    avgRsrp = averageRsrp,
-                    avgRsrq = averageRsrq,
-                    avgSinr = averageSinr,
+                    dataList = data1,
+                    avgRsrp = averageRsrp1,
+                    avgRsrq = averageRsrq1,
+                    avgSinr = averageSinr1,
                     colorSetting = settingObj,
+                    coverageHoleSetting = coverageHoleSetting, // <-- NEW
                     coveragePerfGraph = CoveragePerfGraph,
                 };
+
+                return Json(message);
             }
             catch (Exception ex)
             {
-                message.Status = 0;
-                message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+                Console.WriteLine($"Error fetching prediction data with raw SQL: {ex.Message}");
+                return new JsonResult(new { error = "An error occurred while fetching data.", details = ex.Message }) { StatusCode = 500 };
             }
-
-            return Json(message);
         }
+
+        message.Data = new
+        {
+            dataList = data,
+            avgRsrp = averageRsrp,
+            avgRsrq = averageRsrq,
+            avgSinr = averageSinr,
+            colorSetting = settingObj,
+            coverageHoleSetting = coverageHoleSetting, // <-- NEW
+            coveragePerfGraph = CoveragePerfGraph,
+        };
+    }
+    catch (Exception ex)
+    {
+        message.Status = 0;
+        message.Message = DisplayMessage.ErrorMessage + " " + ex.Message;
+    }
+
+    return Json(message);
+}
+
 
         [HttpGet] // existing
         public JsonResult GetPredictionDataForSelectedBuildingPolygonsRaw(int projectId, string metric)

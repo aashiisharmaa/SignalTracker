@@ -30,6 +30,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<tbl_upload_history> tbl_upload_history { get; set; }
     public DbSet<tbl_prediction_data> tbl_prediction_data { get; set; }
     public DbSet<tbl_project> tbl_project { get; set; }
+        public DbSet<tbl_savepolygon> tbl_savepolygon { get; set; } = default!; 
 
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

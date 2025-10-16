@@ -278,6 +278,20 @@ namespace SignalTracker.Models
         public string? created_by_user_name { get; set; }
         public int status { get; set; }
     }
+    // Models/tbl_savepolygon.cs
+    public class tbl_savepolygon
+    {
+        public int id { get; set; }           // or polygon_id
+        public string? name { get; set; }     // or polygon_name
+    }
+public class PolygonLogFilter
+{
+    public int PolygonId { get; set; }
+    public DateTime? From { get; set; }   // nullable
+    public DateTime? To { get; set; }     // nullable
+    public int Limit { get; set; } = 20000;
+}
+
     public class tbl_upload_history
     {
         public int id { get; set; }
@@ -305,7 +319,8 @@ namespace SignalTracker.Models
 
     public class thresholds
     {
-        public int id { get; set; }
+        public string? coveragehole_json { get; set; }   // NEW (nullable)
+                public int id { get; set; }
         public int user_id { get; set; }
         public string? rsrp_json { get; set; }
         public string? rsrq_json { get; set; }
